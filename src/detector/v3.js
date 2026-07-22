@@ -434,9 +434,19 @@ export function detectV3(imageData, cfg) {
   const ds = downscaleMinMax(imageData, 64);
   let sat = 0;
   for (let i = 0; i < ds.mn.length; i++) sat += ds.mx[i] > 0 ? (ds.mx[i] - ds.mn[i]) / ds.mx[i] : 0;
+  // Two-axis scene gate (measured on the phone corpus):
+  //   saturated bg (wood, sat>0.30)              -> whiteness only
+  //   desaturated + BRIGHT bg (white wall/steel,
+  //     median-mn>95: paper no brighter than bg) -> ink first
+  //   desaturated + DARK bg (charcoal, median<95:
+  //     whiteness signal is huge and stable)     -> whiteness first
+  // Ink-first on dark scenes caused 180px corner jitter (20260722_142x):
+  // text gradients merged with table scratches into runaway hulls.
   const desaturated = sat / ds.mn.length <= 0.30;
-  if (desaturated) {
+  const sorted = Array.from(ds.mn).sort((a, b) => a - b);
+  const bgBright = sorted[sorted.length >> 1] > 95;
+  if (desaturated && bgBright) {
     return detectInk(imageData, cfg) ?? detectWhiteness(imageData, cfg);
   }
-  return detectWhiteness(imageData, cfg);
+  return detectWhiteness(imageData, cfg) ?? (desaturated ? detectInk(imageData, cfg) : null);
 }

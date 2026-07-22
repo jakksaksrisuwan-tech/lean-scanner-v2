@@ -1,6 +1,6 @@
 // Service worker for the lean-scanner PWA.
 // Offline-first: cache the app shell + modules, network-fall back.
-const CACHE = "lean-scanner-v4.3-simsrd";
+const CACHE = "lean-scanner-v4.4-scenegate";
 const SHELL = [
   "./",
   "./index.html",
