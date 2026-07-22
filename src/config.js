@@ -41,7 +41,7 @@ export const DEFAULT_CONFIG = {
     cooldownMs: 800,
   },
   dewarp: {
-    fixedAspect: "A4",  // "A4" | "US_LETTER" | "MAX_EDGE" | "AUTO"
+    fixedAspect: "AUTO",  // natural aspect from quad edges — receipts are not A4; forcing a paper ratio squashes slips
     shadingKernel: 201,
     claheClip: 2.0,
     claheGrid: 8,

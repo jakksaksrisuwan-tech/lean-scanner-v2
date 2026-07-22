@@ -386,8 +386,69 @@ async function loop(getFrame) {
 function addThumbnail(capture) {
   const img = new Image();
   img.src = warpedToDataURL(capture);
+  img.addEventListener("click", () => openViewer(captures.indexOf(capture)));
   capturesEl.appendChild(img);
 }
+
+// ── Capture viewer (tap thumbnail: preview / navigate / save / delete) ──
+const viewer = document.getElementById("viewer");
+const viewerImg = document.getElementById("viewer-img");
+const viewerCounter = document.getElementById("viewer-counter");
+let viewerIdx = -1;
+
+function openViewer(idx) {
+  if (idx < 0 || idx >= captures.length) return;
+  viewerIdx = idx;
+  viewerImg.src = warpedToDataURL(captures[idx]);
+  viewerCounter.textContent = `${idx + 1} / ${captures.length}`;
+  document.getElementById("viewer-prev").disabled = idx === 0;
+  document.getElementById("viewer-next").disabled = idx === captures.length - 1;
+  viewer.hidden = false;
+}
+function closeViewer() { viewer.hidden = true; viewerIdx = -1; }
+
+function captureToFile(c, i) {
+  const b64 = warpedToDataURL(c).split(",")[1];
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let j = 0; j < bin.length; j++) u8[j] = bin.charCodeAt(j);
+  return new File([u8], `page_${i + 1}.png`, { type: "image/png" });
+}
+
+document.getElementById("viewer-close").addEventListener("click", closeViewer);
+viewer.addEventListener("click", (e) => { if (e.target === viewer) closeViewer(); });
+document.getElementById("viewer-prev").addEventListener("click", () => openViewer(viewerIdx - 1));
+document.getElementById("viewer-next").addEventListener("click", () => openViewer(viewerIdx + 1));
+document.addEventListener("keydown", (e) => {
+  if (viewer.hidden) return;
+  if (e.key === "ArrowLeft") openViewer(viewerIdx - 1);
+  else if (e.key === "ArrowRight") openViewer(viewerIdx + 1);
+  else if (e.key === "Escape") closeViewer();
+});
+document.getElementById("viewer-save").addEventListener("click", async () => {
+  if (viewerIdx < 0) return;
+  const file = captureToFile(captures[viewerIdx], viewerIdx);
+  const files = [file];
+  if (navigator.canShare && navigator.canShare({ files })) {
+    try { await navigator.share({ files }); return; } catch (e) { /* cancelled */ }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(file);
+  a.download = file.name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+});
+document.getElementById("viewer-del").addEventListener("click", () => {
+  if (viewerIdx < 0) return;
+  captures.splice(viewerIdx, 1);
+  capturesEl.children[viewerIdx]?.remove();
+  countEl.textContent = String(captures.length);
+  btnDownload.disabled = captures.length === 0;
+  if (captures.length === 0) closeViewer();
+  else openViewer(Math.min(viewerIdx, captures.length - 1));
+});
 
 function warpedToDataURL({ warped, w, h }) {
   const c = document.createElement("canvas");
