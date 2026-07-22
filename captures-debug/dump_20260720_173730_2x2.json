@@ -1,0 +1,21 @@
+{
+  "w": 2,
+  "h": 2,
+  "bytes": 3,
+  "time": 1784543850.909941,
+  "rawQuad": [
+    0,
+    0,
+    1,
+    0,
+    1,
+    1,
+    0,
+    1
+  ],
+  "smoothQuad": null,
+  "centroid": null,
+  "conf": null,
+  "detMs": null,
+  "dumpIdx": null
+}

@@ -1,0 +1,26 @@
+{
+  "w": 2,
+  "h": 2,
+  "time": 1784545263.776866,
+  "layers": [
+    {
+      "name": "rgb",
+      "path": "dump_20260720_180103_2x2.rgb.raw"
+    },
+    {
+      "name": "mask",
+      "path": "dump_20260720_180103_2x2.mask.png"
+    },
+    {
+      "name": "broken",
+      "path": "dump_20260720_180103_2x2.broken.raw"
+    }
+  ],
+  "rawQuad": null,
+  "smoothQuad": null,
+  "centroid": null,
+  "conf": null,
+  "detMs": null,
+  "dumpIdx": null,
+  "mode": "rich"
+}

@@ -1,0 +1,18 @@
+{
+  "w": 640,
+  "h": 640,
+  "time": 1784612647.7408042,
+  "layers": [
+    {
+      "name": "rgb",
+      "path": "dump_20260721_124407_640x640.rgb.raw"
+    }
+  ],
+  "rawQuad": null,
+  "smoothQuad": null,
+  "centroid": null,
+  "conf": null,
+  "detMs": -1,
+  "dumpIdx": 4,
+  "mode": "simple"
+}

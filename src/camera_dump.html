@@ -1,0 +1,213 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>camera dump + detector readout</title>
+<style>
+  body { background: #000; color: #fff; font-family: ui-monospace, Menlo, monospace; margin: 0; padding: 12px; }
+  h1 { font-size: 16px; margin: 8px 0 12px; }
+  #status { font-size: 12px; color: #aaa; }
+  button { font-size: 22px; padding: 16px 24px; margin: 12px 0; background: #4ea1ff; color: #000; border: none; border-radius: 8px; }
+  button:disabled { opacity: 0.4; }
+  #out { font-size: 11px; line-height: 1.5; background: #1a1a1a; padding: 8px; border-radius: 4px; max-height: 240px; overflow: auto; white-space: pre-wrap; }
+  canvas { display: none; }
+  #overlay-wrap { position: relative; width: 100%; max-width: 480px; aspect-ratio: 4/3; background: #1a1a1a; border-radius: 8px; margin: 8px 0; }
+  #overlay-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  video { display: none; }
+</style>
+</head>
+<body>
+<h1>camera dump + v2 detector readout</h1>
+<p>aim camera at a doc, frame fills the box, tap <b>dump</b>. Each dump writes the raw camera frame AND the detector's output (raw quad, smoothed quad, centroid, frame dims) to the server. Use this to verify detector behavior on real frames without eyeballing pixels.</p>
+<div id="overlay-wrap">
+  <canvas id="overlay-canvas" width="640" height="480"></canvas>
+</div>
+<button id="btn-dump" disabled>dump</button>
+<p id="status">waiting for camera...</p>
+<pre id="out">no dumps yet</pre>
+
+<script type="module">
+import { detectV3 as detectHighContrast } from "./detector/v3.js";
+import { orderCorners } from "./detector/quad.js";
+
+const cfg = {
+  longEdge: 640,
+  minQuadAreaRatio: 0.05,
+  maxQuadAreaRatio: 0.95,
+  minAspect: 0.2,
+  maxAspect: 5.0,
+};
+
+const $btn = document.getElementById("btn-dump");
+const $status = document.getElementById("status");
+const $out = document.getElementById("out");
+const $overlay = document.getElementById("overlay-canvas");
+const overlayCtx = $overlay.getContext("2d");
+
+const v = document.createElement("video");
+v.autoplay = true; v.muted = true; v.playsInline = true;
+document.body.appendChild(v);
+
+const c = document.createElement("canvas");
+document.body.appendChild(c);
+
+// Kalman-style smoother (lightweight, same idea as v1's KalmanQuad
+// but just for the UI dump, not gating). Initialized on first detection.
+const smoother = {
+  prev: null,
+  alpha: 0.4, // higher = closer to raw, lower = smoother
+  update(quad) {
+    if (quad === null) return null;
+    if (this.prev === null) {
+      this.prev = quad.slice();
+      return quad.slice();
+    }
+    for (let i = 0; i < quad.length; i++) {
+      this.prev[i] = this.alpha * quad[i] + (1 - this.alpha) * this.prev[i];
+    }
+    return this.prev.slice();
+  },
+};
+
+// Pre-display loop: draw the camera + detector overlay on the small
+// preview canvas (sized to the camera's native pixel dimensions, but
+// scaled visually by the CSS aspect-ratio container).
+function drawPreview(det, smoothed, W, H) {
+  $overlay.width = W;
+  $overlay.height = H;
+  overlayCtx.drawImage(v, 0, 0, W, H);
+  if (det) {
+    overlayCtx.strokeStyle = "rgba(74,161,255,0.85)";
+    overlayCtx.lineWidth = 3;
+    overlayCtx.beginPath();
+    overlayCtx.moveTo(det[0], det[1]);
+    overlayCtx.lineTo(det[2], det[3]);
+    overlayCtx.lineTo(det[4], det[5]);
+    overlayCtx.lineTo(det[6], det[7]);
+    overlayCtx.closePath();
+    overlayCtx.stroke();
+    if (smoothed) {
+      overlayCtx.strokeStyle = "rgba(255,200,0,0.6)";
+      overlayCtx.lineWidth = 2;
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(smoothed[0], smoothed[1]);
+      overlayCtx.lineTo(smoothed[2], smoothed[3]);
+      overlayCtx.lineTo(smoothed[4], smoothed[5]);
+      overlayCtx.lineTo(smoothed[6], smoothed[7]);
+      overlayCtx.closePath();
+      overlayCtx.stroke();
+    }
+    const cx = (det[0]+det[2]+det[4]+det[6]) / 4;
+    const cy = (det[1]+det[3]+det[5]+det[7]) / 4;
+    overlayCtx.fillStyle = "rgba(74,161,255,0.7)";
+    overlayCtx.beginPath();
+    overlayCtx.arc(cx, cy, 24, 0, Math.PI * 2);
+    overlayCtx.fill();
+  }
+}
+
+async function cameraReady(stream) {
+  v.srcObject = stream;
+  await v.play();
+  $status.textContent = "camera ready. tap dump.";
+  $btn.disabled = false;
+  // Run a soft detector loop (no saving, just preview)
+  let lastDet = null;
+  let lastSm = null;
+  const tick = () => {
+    if (v.readyState >= 2 && v.videoWidth > 0) {
+      const W = v.videoWidth, H = v.videoHeight;
+      const cnv = document.createElement("canvas");
+      cnv.width = W; cnv.height = H;
+      const ictx = cnv.getContext("2d");
+      ictx.drawImage(v, 0, 0);
+      const img = ictx.getImageData(0, 0, W, H);
+      const t0 = performance.now();
+      const det = detectHighContrast(img, cfg);
+      const dtMs = performance.now() - t0;
+      if (det) {
+        lastDet = det.quad;
+        lastSm = smoother.update(det.quad);
+        $status.textContent =
+          `cam ${W}x${H}  det ${dtMs.toFixed(1)}ms  quad: ${det.quad.slice(0,2).map(v=>v.toFixed(0)).join(",")}…`;
+      } else {
+        lastDet = null;
+        lastSm = null;
+        $status.textContent = `cam ${W}x${H}  no detection`;
+      }
+      drawPreview(lastDet, lastSm, W, H);
+    }
+    requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+navigator.mediaDevices.getUserMedia({video: {facingMode: "environment"}, audio: false})
+  .then(cameraReady)
+  .catch(err => $status.textContent = "err " + err.message);
+
+$btn.onclick = async () => {
+  if (v.readyState < 2) return;
+  const W = v.videoWidth, H = v.videoHeight;
+  c.width = W; c.height = H;
+  c.getContext("2d").drawImage(v, 0, 0);
+  const img = c.getContext("2d").getImageData(0, 0, W, H);
+  // Drop alpha → RGB bytes
+  const rgb = new Uint8ClampedArray(W * H * 3);
+  for (let i = 0; i < W * H; i++) {
+    rgb[i*3]   = img.data[i*4];
+    rgb[i*3+1] = img.data[i*4+1];
+    rgb[i*3+2] = img.data[i*4+2];
+  }
+  // Run detector on THIS frame
+  const t0 = performance.now();
+  const det = detectHighContrast(img, cfg);
+  const dtMs = performance.now() - t0;
+  const smooth = det ? smoother.update(det.quad) : null;
+
+  // Base64 the RGB
+  let bin = "";
+  for (let i = 0; i < rgb.length; i++) bin += String.fromCharCode(rgb[i]);
+  const b64 = btoa(bin);
+
+  $status.textContent = `uploading ${W}x${H}...`;
+
+  try {
+    const res = await fetch("/api/dump", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        w: W, h: H, b64,
+        rawQuad: det ? det.quad : null,
+        smoothQuad: smooth,
+        centroid: det ? { cx: det.cx, cy: det.cy } : null,
+        conf: det ? det.confidence : null,
+        detMs: dtMs,
+        // frame index into the smoother (epoch-ish): every dump gets bumped
+        dumpIdx: ++window.__dumpIdx,
+      }),
+    });
+    const j = await res.json();
+    // Local readout (so you don't have to scroll server logs to see what was saved)
+    const lines = [];
+    lines.push(`#${window.__dumpIdx}  ${W}x${H}  det ${dtMs.toFixed(1)}ms  ${j.path || "(server no path)"}`);
+    if (det) {
+      lines.push(`  raw (TL,TR,BR,BL): ${det.quad.map(v=>v.toFixed(0)).join(", ")}`);
+      lines.push(`  centroid: ${det.cx.toFixed(0)},${det.cy.toFixed(0)}  conf=${det.confidence.toFixed(2)}`);
+      if (smooth) {
+        lines.push(`  smooth: ${smooth.map(v=>v.toFixed(0)).join(", ")}`);
+      }
+    } else {
+      lines.push("  no detection this frame");
+    }
+    lines.push("");
+    $out.textContent = lines.join("\n") + $out.textContent;
+    $status.textContent = `saved #${window.__dumpIdx}`;
+  } catch (e) {
+    $status.textContent = "err " + e.message;
+  }
+};
+window.__dumpIdx = 0;
+</script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "w": 4,
+  "h": 4,
+  "time": 1784545047.225847,
+  "layers": [
+    {
+      "name": "rgb.rgb",
+      "path": "dump_20260720_175727_4x4.rgb.raw"
+    },
+    {
+      "name": "mask.png",
+      "path": "dump_20260720_175727_4x4.mask.png"
+    },
+    {
+      "name": "broken.rgb",
+      "path": "dump_20260720_175727_4x4.broken.rgb"
+    }
+  ],
+  "rawQuad": null,
+  "smoothQuad": null,
+  "centroid": null,
+  "conf": null,
+  "detMs": null,
+  "dumpIdx": null,
+  "mode": "rich"
+}

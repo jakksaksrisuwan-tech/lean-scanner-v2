@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>UX Preview</title>
+  <style>
+    body {
+      background: #1a1a1a;
+      color: #e8e8e8;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 0;
+      margin: 0;
+      height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+    header {
+      padding: 12px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    h1 { font-size: 16px; margin: 0; font-weight: 600; }
+    .phase-bar {
+      display: flex;
+      gap: 6px;
+    }
+    .pill {
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 11px;
+      padding: 5px 12px;
+      border-radius: 12px;
+      background: #2a2a2a;
+      border: 1px solid #3a3a3a;
+      color: #777;
+      letter-spacing: 0.04em;
+    }
+    .pill.active { color: #fff; border-color: #4ea1ff; background: rgba(74,161,255,0.18); }
+    main {
+      position: relative;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+    }
+    #stage {
+      position: relative;
+      width: 720px;
+      max-width: 100%;
+      aspect-ratio: 4/3;
+      background: #0a0a0a;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 6px 40px rgba(0,0,0,0.4);
+    }
+    #photo {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    #photo-placeholder {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, #1f1f1f 0%, #0e0e0e 100%);
+    }
+    #overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .controls {
+      padding: 14px 20px 18px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+    button {
+      background: #2a2a2a;
+      color: #e8e8e8;
+      border: 1px solid #3a3a3a;
+      border-radius: 10px;
+      padding: 12px 8px;
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    button:hover { background: #333; }
+    button:active { background: #1f1f1f; }
+    button.primary { background: #4ea1ff; color: #000; border-color: #4ea1ff; }
+    button.primary:hover { background: #5fb1ff; }
+    button[disabled] { opacity: 0.4; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Lean Scanner — UX Preview</h1>
+    <div class="phase-bar">
+      <span id="p1" class="pill">1. SEARCHING</span>
+      <span id="p2" class="pill">2. IDENTIFYING</span>
+      <span id="p3" class="pill">3. LOCKED</span>
+      <span id="p4" class="pill">4. FIRING</span>
+    </div>
+  </header>
+  <main>
+    <div id="stage">
+      <div id="photo-placeholder"></div>
+      <img id="photo" alt="">
+      <canvas id="overlay" width="800" height="600"></canvas>
+    </div>
+  </main>
+  <div class="controls">
+    <button id="btn-identifying">Phase 2 — identifying</button>
+    <button id="btn-locked">Phase 3 — locked</button>
+    <button id="btn-firing" class="primary">Phase 4 — fire!</button>
+    <button id="btn-reset">Reset</button>
+  </div>
+
+  <script>
+  // Draw a synthetic receipt: dark wood background, white paper, sparse text lines,
+  // rotated 30 degrees. Reads as a real-looking receipt frame for the UX demo.
+  const photo = document.getElementById("photo");
+  const overlay = document.getElementById("overlay");
+  const ctx = overlay.getContext("2d");
+
+  function drawReceipt(W, H) {
+    const c = document.createElement("canvas");
+    c.width = W; c.height = H;
+    const cx = c.getContext("2d");
+    // Dark wood-ish background
+    cx.fillStyle = "#2a1f17";
+    cx.fillRect(0, 0, W, H);
+    // Speckles for grain
+    for (let i = 0; i < 1500; i++) {
+      const x = Math.random() * W;
+      const y = Math.random() * H;
+      cx.fillStyle = `rgba(${100 + Math.random() * 80}, ${60 + Math.random() * 40}, ${30 + Math.random() * 30}, 0.5)`;
+      cx.fillRect(x, y, 2, 2);
+    }
+    // Rotated paper rectangle
+    cx.save();
+    cx.translate(W / 2, H / 2);
+    cx.rotate(-18 * Math.PI / 180);
+    cx.fillStyle = "#f3f0e8";
+    cx.fillRect(-170, -200, 340, 400);
+    // Title bar
+    cx.fillStyle = "#1a1a1a";
+    cx.fillRect(-150, -180, 300, 18);
+    // Body lines
+    cx.fillStyle = "#3a3530";
+    for (let y = -140; y < 180; y += 16) {
+      const w = 200 + Math.random() * 80;
+      cx.fillRect(-150, y, w, 4);
+    }
+    // Receipt total
+    cx.fillStyle = "#1a1a1a";
+    cx.fillRect(-150, 130, 300, 18);
+    cx.fillRect(120, 130, 30, 18);
+    cx.restore();
+    return c.toDataURL("image/png");
+  }
+
+  const receiptURL = drawReceipt(800, 600);
+  photo.src = receiptURL;
+
+  // Synthetic detected quad (where the algorithm "found" the receipt).
+  // The corners in (TL, TR, BR, BL) flat-8 order, after rotation.
+  const quad = [
+    290, 220,   // TL
+    540, 180,   // TR
+    580, 410,   // BR
+    330, 450,   // BL
+  ];
+  const centroid = {
+    x: (quad[0] + quad[2] + quad[4] + quad[6]) / 4,
+    y: (quad[1] + quad[3] + quad[5] + quad[7]) / 4,
+  };
+
+  // Segmentation — drawn as a 24x24 grid in the photo.
+  function drawSegmentation() {
+    const G = 24;
+    const W = overlay.width, H = overlay.height;
+    const cw = W / G, ch = H / G;
+    for (let cy = 0; cy < G; cy++) {
+      for (let cx = 0; cx < G; cx++) {
+        // Faux segmentation: probability high inside the rotated rect bounds.
+        // Compute approx via shape — ellipse with axis-aligned bbox over the quad.
+        const inside =
+          cx > 11 && cx < 18 && cy > 7 && cy < 19;  // rough rotated rect band
+        const noise = Math.random();
+        if (inside && noise > 0.25) {
+          const v = 0.5 + Math.random() * 0.5;
+          ctx.fillStyle = `rgba(74, 161, 255, ${v * 0.30})`;
+          ctx.fillRect(cx * cw, cy * ch, cw + 1, ch + 1);
+        }
+      }
+    }
+  }
+
+  function clearOverlay() {
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    setActive(null);
+  }
+
+  function setActive(which) {
+    ["p1", "p2", "p3", "p4"].forEach((id, i) => {
+      const el = document.getElementById(id);
+      el.classList.toggle("active", which === i + 1);
+    });
+  }
+
+  function drawQuadOutline(q, color, lineWidth = 3) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.beginPath();
+    ctx.moveTo(q[0], q[1]);
+    ctx.lineTo(q[2], q[3]);
+    ctx.lineTo(q[4], q[5]);
+    ctx.lineTo(q[6], q[7]);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.fillStyle = color;
+    for (let i = 0; i < 4; i++) {
+      ctx.beginPath();
+      ctx.arc(q[i * 2], q[i * 2 + 1], 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawSolidCircle(cx, cy, r, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.6)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // ── Phase renders ────────────────────────────────────────────────────
+
+  document.getElementById("btn-identifying").addEventListener("click", () => {
+    clearOverlay();
+    setActive(2);
+    drawSegmentation();
+    drawSolidCircle(centroid.x, centroid.y, 30, "rgba(74, 161, 255, 0.55)");
+    drawQuadOutline(quad, "rgba(74, 161, 255, 0.6)");
+  });
+
+  document.getElementById("btn-locked").addEventListener("click", () => {
+    clearOverlay();
+    setActive(3);
+    drawSolidCircle(centroid.x, centroid.y, 36, "#4ea1ff");
+    drawQuadOutline(quad, "rgba(74, 161, 255, 0.85)", 4);
+  });
+
+  // Fire animation: 4 wedges fanning out from centroid to corners.
+  document.getElementById("btn-firing").addEventListener("click", () => {
+    clearOverlay();
+    setActive(4);
+    const corners = [
+      { x: quad[0], y: quad[1] },
+      { x: quad[2], y: quad[3] },
+      { x: quad[4], y: quad[5] },
+      { x: quad[6], y: quad[7] },
+    ];
+    const startT = performance.now();
+    const DURATION = 600;
+    function easeInOut(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+    function frame(now) {
+      const t = Math.min(1, (now - startT) / DURATION);
+      const e = easeInOut(t);
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      ctx.fillStyle = "rgba(74, 161, 255, 0.85)";
+      for (let i = 0; i < 4; i++) {
+        const c = corners[i];
+        const next = corners[(i + 1) % 4];
+        const tipX = centroid.x + (c.x - centroid.x) * e;
+        const tipY = centroid.y + (c.y - centroid.y) * e;
+        const dx = c.x - centroid.x, dy = c.y - centroid.y;
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        const px = -dy / len, py = dx / len;
+        const baseHalf = Math.max(10, len * 0.10 * (1 - e * 0.7));
+        const nx = centroid.x + (next.x - centroid.x) * 0.25;
+        const ny = centroid.y + (next.y - centroid.y) * 0.25;
+        ctx.beginPath();
+        ctx.moveTo(centroid.x, centroid.y);
+        ctx.lineTo(tipX + px * baseHalf, tipY + py * baseHalf);
+        ctx.lineTo(tipX - px * baseHalf, tipY - py * baseHalf);
+        ctx.lineTo(nx, ny);
+        ctx.closePath();
+        ctx.fill();
+      }
+      if (t < 1) requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  });
+
+  document.getElementById("btn-reset").addEventListener("click", () => {
+    clearOverlay();
+    setActive(null);
+  });
+  </script>
+</body>
+</html>

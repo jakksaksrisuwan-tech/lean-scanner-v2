@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="theme-color" content="#1a1a1a">
+  <title>Lean Scanner</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <style>
+    :root {
+      --bg: #1a1a1a;
+      --fg: #e8e8e8;
+      --muted: #888;
+      --accent: #4ea1ff;
+      --good: #4ade80;
+      --warn: #fbbf24;
+      --bad: #f87171;
+      --panel: #252525;
+      --border: #333;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      height: 100%;
+      overflow: hidden;
+      -webkit-tap-highlight-color: transparent;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+      padding: 12px;
+      gap: 12px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    .state {
+      font-size: 12px;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      padding: 4px 10px;
+      border-radius: 12px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .state.searching { color: var(--muted); }
+    .state.unstable  { color: var(--warn); }
+    .state.almost    { color: var(--accent); }
+    .state.locked    { color: var(--good); }
+    .state.cooldown  { color: var(--bad); }
+
+    #video-wrap {
+      flex: 1;
+      position: relative;
+      background: #000;
+      border-radius: 12px;
+      overflow: hidden;
+      min-height: 200px;
+    }
+    video, canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    canvas { pointer-events: none; }
+    #overlay { z-index: 2; }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+    }
+    button {
+      background: var(--panel);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    button:active { background: #333; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.primary {
+      background: var(--accent);
+      color: #000;
+      border-color: var(--accent);
+    }
+    button.primary:active { background: #3b8ce8; }
+
+    .stats {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--muted);
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    }
+    .stats .metric { display: flex; gap: 6px; }
+    .stats .metric b { color: var(--fg); font-weight: 600; }
+
+    .captures {
+      max-height: 90px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      white-space: nowrap;
+      padding-bottom: 4px;
+    }
+    .captures img {
+      height: 80px;
+      border-radius: 6px;
+      margin-right: 6px;
+      border: 1px solid var(--border);
+      vertical-align: top;
+    }
+    .captures:empty::before {
+      content: "captures will appear here";
+      color: var(--muted);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Lean Scanner</h1>
+    <span id="state" class="state searching">SEARCHING</span>
+  </header>
+
+  <div id="video-wrap">
+    <video id="cam" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div class="stats">
+    <span class="metric">fps <b id="fps">0</b></span>
+    <span class="metric">quality <b id="quality">—</b></span>
+    <span class="metric">captures <b id="count">0</b></span>
+  </div>
+
+  <div class="controls">
+    <button id="btn-sim">simulator</button>
+    <button id="btn-camera" disabled>camera</button>
+    <button id="btn-fire">force fire</button>
+    <button id="btn-super">superscan</button>
+    <label style="display:flex;align-items:center;gap:4px;font-size:12px"><input type="checkbox" id="chk-bw">B&amp;W</label>
+    <button id="btn-dump">dump</button>
+    <button id="btn-download" class="primary" disabled>download</button>
+  </div>
+
+  <div class="captures" id="captures"></div>
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>

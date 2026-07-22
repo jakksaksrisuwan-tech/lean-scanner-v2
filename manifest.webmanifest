@@ -1,0 +1,19 @@
+{
+  "name": "Lean Scanner",
+  "short_name": "Scanner",
+  "description": "Auto-capture document scanner with perspective dewarp",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#1a1a1a",
+  "theme_color": "#1a1a1a",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

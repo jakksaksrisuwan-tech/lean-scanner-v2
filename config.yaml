@@ -1,0 +1,48 @@
+# Auto-capture document scanner — configuration
+#
+# All thresholds are documented inline. Edit-and-reload.
+
+detector:
+  long_edge: 640            # resize long edge to this before detection
+  canny_low: 75
+  canny_high: 200
+  morph_kernel: 9
+  morph_iterations: 3
+  min_quad_area_ratio: 0.05 # 5% of frame
+  max_quad_area_ratio: 0.98
+  min_aspect: 0.2
+  max_aspect: 5.0
+
+quality:
+  capture_threshold: 0.70   # score >= this AND stable for N frames -> fire
+  weight_area: 0.30
+  weight_straightness: 0.20
+  weight_sharpness: 0.25
+  weight_exposure: 0.10
+  weight_blur: 0.15
+  min_area_ratio: 0.10
+  target_area_ratio: 0.30
+  sharpness_full: 200.0
+  blur_full: 80.0
+  exposure_low: 60.0
+  exposure_high: 220.0
+  glare_pixel_threshold: 240
+  glare_max_ratio: 0.15
+
+lock:
+  n_stable_frames: 8        # ~267 ms at 30 fps
+  corner_dist_px: 20.0
+  quality_release_ratio: 0.8
+  cooldown_ms: 800          # suppress duplicate fires on same target
+
+dewarp:
+  fixed_aspect: "A4"        # "A4" | "US_LETTER" | "MAX_EDGE" | "AUTO"
+  shading_kernel: 201
+  clahe_clip: 2.0
+  clahe_grid: 8
+  binarize: false
+
+# Camera + output
+camera_index: 0
+fps: 30
+output_dir: ./captures

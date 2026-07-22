@@ -1,0 +1,39 @@
+# Auto-capture document scanner — package metadata
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autocapture"
+version = "0.1.0"
+description = "Auto-capture + dewarp document scanner that fires the way QR scanners do"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+# Runtime deps are intentionally minimal — pure numpy + Pillow.
+# OpenCV and the deep-learning pieces are optional (see requirements.txt).
+dependencies = [
+    "numpy>=2.0,<3.0",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+cv = ["opencv-python>=4.10"]
+tracker = ["filterpy>=1.4"]
+detector = ["ultralytics>=8.3"]
+viz = ["matplotlib>=3.9"]
+all = [
+    "opencv-python>=4.10",
+    "filterpy>=1.4",
+    "ultralytics>=8.3",
+    "matplotlib>=3.9",
+]
+
+[project.scripts]
+autocapture = "autocapture.pipeline:main"
+autocapture-sim = "examples.run_simulation:main"
+
+[tool.setuptools.packages.find]
+include = ["autocapture*", "examples*"]

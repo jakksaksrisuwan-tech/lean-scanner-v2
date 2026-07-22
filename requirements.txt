@@ -1,0 +1,25 @@
+# Auto-capture document scanner — runtime requirements
+#
+# Verified against Python 3.11. The package is designed to work
+# WITHOUT the optional libraries by using pure-numpy fallbacks.
+# The optional libraries are the production path.
+
+# ── Required (all verified to run on this box) ───────────────────────────
+numpy>=2.0,<3.0
+Pillow>=10.0
+
+# ── Optional: production path (uncomment for real deployment) ────────────
+# OpenCV — Canny, findContours, approxPolyDP, warpPerspective, VideoCapture
+# opencv-python>=4.10
+#
+# Kalman filter with covariance control
+# filterpy>=1.4
+#
+# YOLOv8 detector (5–10 MB int8 on-device)
+# ultralytics>=8.3
+#
+# Optional on-device dewarp (NCNN port of DocTr)
+# ncnn>=2.0
+#
+# Visualization in the simulation harness
+# matplotlib>=3.9

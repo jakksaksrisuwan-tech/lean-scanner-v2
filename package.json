@@ -1,0 +1,21 @@
+{
+  "name": "lean-scanner",
+  "version": "0.1.0",
+  "description": "Auto-capture document scanner PWA \u2014 port of autocapture-draft",
+  "type": "module",
+  "scripts": {
+    "start": "python3 server.py",
+    "test": "npm run test:py && npm run test:corpus && npm run test:synth",
+    "test:py": "PYTHONPATH=. python3 tests/test_consistency.py",
+    "test:corpus": "node tests/test_real_corpus.mjs",
+    "test:synth": "node tests/test_v3_detector.mjs",
+    "test:srd": "node benches/srd_bench.mjs",
+    "test:all": "npm test && npm run test:srd",
+    "golden:update": "node tests/test_real_corpus.mjs --update"
+  },
+  "private": true,
+  "dependencies": {
+    "onnxruntime-node": "^1.27.0",
+    "pngjs": "^7.0.0"
+  }
+}
