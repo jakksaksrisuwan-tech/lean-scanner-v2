@@ -213,8 +213,12 @@ export function detectWhiteness(imageData, cfg, strict = false) {
   if (hull.length < 4) return null;
   const maq = maxAreaQuad(hull);
   if (!maq) return null;
-  const refined = refineQuad(maq.quad, boundary) ??
-    maq.quad.flat();
+  let refined = refineQuad(maq.quad, boundary) ?? maq.quad.flat();
+  // era-composition: polish sides against sharp step edges (±6px);
+  // sides without step evidence keep the blob-boundary fit
+  const polishW = refineSidesToEdges(ch, W, H, refined, 6, 6);
+  let edgeQuality = 0;
+  if (polishW) { refined = polishW.quad; edgeQuality = polishW.quality; }
 
   // shoelace area of the refined quad
   let qa = 0;
@@ -256,7 +260,7 @@ export function detectWhiteness(imageData, cfg, strict = false) {
     }
   }
 
-  return { quad, confidence: Math.min(1, solidity), segmentation: seg, cx, cy , path: "whiteness" };
+  return { quad, confidence: Math.min(1, solidity), segmentation: seg, cx, cy , path: "whiteness", edgeQuality };
 }
 
 // Ink-density fallback for light backgrounds (white wall, steel table):
@@ -365,31 +369,33 @@ function detectInk(imageData, cfg, strict = false) {
   const solidity = comp.area / Math.max(1, maq.area);
   if (solidity < 0.45) return null;
 
-  // additive margin: erosion radius (7*2/2 per side ≈ 7px core loss after
-  // symmetric open, measured) + paper border beyond the outermost strokes.
-  // Deliberately loose — the second-pass crop refinement in detectV3
-  // tightens it against the local boundary (see refineByCrop).
-  // In strict (rescue/refine crop) contexts the hull comes from clean
-  // local statistics — the full-frame margin guess mostly re-adds bg
-  // ring there (loose battery-pack quads). Keep it only as erosion
-  // compensation.
-  const MARGIN = strict ? 8 : 22;
+  // era-composition: the ink hull marks the TEXT block; the paper edge
+  // lies outward of it. Search outward for the sharp step edge (up to
+  // 26px past the hull) instead of adding a guessed margin; sides with
+  // no step evidence keep a small +8 erosion compensation.
   let cx = 0, cy = 0;
   for (const [x, y] of quad) { cx += x; cy += y; }
   cx /= 4; cy /= 4;
-  const fw = imageData.width, fh = imageData.height;
-  const flat = [];
+  const seed = [];
   for (const [x, y] of quad) {
     const vx = x - cx, vy = y - cy;
     const L = Math.max(1, Math.hypot(vx, vy));
-    flat.push(
-      Math.min(fw - 1, Math.max(0, (cx + vx * (1 + MARGIN / L)) / scale)),
-      Math.min(fh - 1, Math.max(0, (cy + vy * (1 + MARGIN / L)) / scale)));
+    seed.push(cx + vx * (1 + 8 / L), cy + vy * (1 + 8 / L));
+  }
+  const polishI = refineSidesToEdges(mn, W, H, seed, 26, 4);
+  let edgeQuality = 0;
+  let work = seed;
+  if (polishI) { work = polishI.quad; edgeQuality = polishI.quality; }
+  const fw = imageData.width, fh = imageData.height;
+  const flat = [];
+  for (let i = 0; i < 8; i += 2) {
+    flat.push(Math.min(fw - 1, Math.max(0, work[i] / scale)),
+              Math.min(fh - 1, Math.max(0, work[i + 1] / scale)));
   }
   const ordered = orderCorners(flat);
   let ocx = 0, ocy = 0;
   for (let i = 0; i < 4; i++) { ocx += ordered[i * 2]; ocy += ordered[i * 2 + 1]; }
-  return { quad: ordered, confidence: Math.min(1, solidity), segmentation: null, cx: ocx / 4, cy: ocy / 4, path: "ink" };
+  return { quad: ordered, confidence: Math.min(1, solidity), segmentation: null, cx: ocx / 4, cy: ocy / 4, path: "ink", edgeQuality };
 }
 
 // ── Flood localizer ─────────────────────────────────────────────────────
@@ -572,6 +578,105 @@ export function detectV3(imageData, cfg) {
   return refineByCrop(imageData, cfg, out) ?? out;
 }
 
+
+// ── Unified boundary refinement (the composition keystone) ──────────────
+// Fit each quad side to SHARP step edges of the min-channel — the three
+// eras working together: the segmentation (whiteness blob or ink hull)
+// provides the initial side, perpendicular profile scans provide edge
+// evidence, and the glare-era sharp-vs-soft distinction is applied PER
+// POINT: a document edge concentrates its intensity change within ~2px
+// (step); a light transition spreads it over many (ramp). Only step
+// points feed the least-squares line; a side without enough step
+// evidence keeps its segmentation position.
+// Returns { quad, quality } — quality = fraction of sides edge-fitted.
+function refineSidesToEdges(mn, W, H, quad, searchOut, searchIn) {
+  let cx = 0, cy = 0;
+  for (let i = 0; i < 4; i++) { cx += quad[i * 2]; cy += quad[i * 2 + 1]; }
+  cx /= 4; cy /= 4;
+  const lines = [];
+  let fitted = 0;
+  for (let k = 0; k < 4; k++) {
+    const ax = quad[k * 2], ay = quad[k * 2 + 1];
+    const bx = quad[((k + 1) % 4) * 2], by = quad[((k + 1) % 4) * 2 + 1];
+    const dx = bx - ax, dy = by - ay;
+    const L = Math.hypot(dx, dy);
+    if (L < 8) return null;
+    // inward normal
+    let nx = -dy / L, ny = dx / L;
+    const mx0 = (ax + bx) / 2, my0 = (ay + by) / 2;
+    if (nx * (cx - mx0) + ny * (cy - my0) < 0) { nx = -nx; ny = -ny; }
+    const pts = [];
+    let samples = 0;
+    for (let t = 0.12; t <= 0.88; t += 0.04) {
+      const px = ax + dx * t, py = ay + dy * t;
+      samples++;
+      // profile along the normal: s<0 outward, s>0 inward
+      let bestS = null, bestStep = 0;
+      for (let sPos = -searchOut; sPos <= searchIn; sPos++) {
+        const sx = Math.round(px + nx * sPos), sy = Math.round(py + ny * sPos);
+        const ox = Math.round(px + nx * (sPos - 2)), oy = Math.round(py + ny * (sPos - 2));
+        const ix = Math.round(px + nx * (sPos + 2)), iy = Math.round(py + ny * (sPos + 2));
+        const wx = Math.round(px + nx * (sPos - 6)), wy = Math.round(py + ny * (sPos - 6));
+        const vx2 = Math.round(px + nx * (sPos + 6)), vy2 = Math.round(py + ny * (sPos + 6));
+        if (ox < 0 || oy < 0 || ix < 0 || iy < 0 || wx < 0 || wy < 0 || vx2 < 0 || vy2 < 0) continue;
+        if (ox >= W || ix >= W || wx >= W || vx2 >= W || oy >= H || iy >= H || wy >= H || vy2 >= H) continue;
+        void sx; void sy;
+        const step = Math.abs(mn[iy * W + ix] - mn[oy * W + ox]);       // change over 4px
+        if (step < 18) continue;
+        const wide = Math.abs(mn[vy2 * W + vx2] - mn[wy * W + wx]);     // change over 12px
+        // sharp: most of the wide change concentrated in the 4px core
+        if (step < 0.55 * Math.max(wide, step)) continue;
+        if (step > bestStep) { bestStep = step; bestS = sPos; }
+      }
+      if (bestS !== null) pts.push(px + nx * bestS, py + ny * bestS);
+    }
+    if (pts.length < 0.55 * samples) {
+      lines.push({ nx: nx, ny: ny, d: nx * ax + ny * ay, fit: false });
+      continue;
+    }
+    // principal-axis LSQ with one trim pass
+    let coef = null, use = pts;
+    for (let pass = 0; pass < 2; pass++) {
+      let sx2 = 0, sy2 = 0;
+      const cnt = use.length / 2;
+      for (let i = 0; i < use.length; i += 2) { sx2 += use[i]; sy2 += use[i + 1]; }
+      const ux = sx2 / cnt, uy = sy2 / cnt;
+      let sxx = 0, sxy = 0, syy = 0;
+      for (let i = 0; i < use.length; i += 2) {
+        const ex = use[i] - ux, ey = use[i + 1] - uy;
+        sxx += ex * ex; sxy += ex * ey; syy += ey * ey;
+      }
+      let vx, vy;
+      if (Math.abs(sxy) < 1e-9) { [vx, vy] = sxx >= syy ? [1, 0] : [0, 1]; }
+      else {
+        const tt = (sxx + syy) / 2, disc = Math.sqrt(((sxx - syy) / 2) ** 2 + sxy * sxy);
+        vx = sxy; vy = (tt + disc) - sxx;
+        const l2 = Math.hypot(vx, vy); vx /= l2; vy /= l2;
+      }
+      const rnx = -vy, rny = vx, rd = rnx * ux + rny * uy;
+      coef = { nx: rnx, ny: rny, d: rd };
+      if (pass === 0) {
+        const kept = [];
+        for (let i = 0; i < use.length; i += 2) {
+          if (Math.abs(rnx * use[i] + rny * use[i + 1] - rd) <= 2.5) kept.push(use[i], use[i + 1]);
+        }
+        if (kept.length < 8 || kept.length === use.length) break;
+        use = kept;
+      }
+    }
+    lines.push({ ...coef, fit: true });
+    fitted++;
+  }
+  const out = [];
+  for (let k = 0; k < 4; k++) {
+    const A = lines[k], B = lines[(k + 1) % 4];
+    const det = A.nx * B.ny - B.nx * A.ny;
+    if (Math.abs(det) < 1e-9) return null;
+    out.push((A.d * B.ny - B.d * A.ny) / det, (A.nx * B.d - B.nx * A.d) / det);
+  }
+  return { quad: out, quality: fitted / 4 };
+}
+
 // Tighter-wins with a RING-clipping guard. The precise question is not
 // "how much total ink does each contain" (noisy) but "what lies in the
 // ring between them": a logo/text in the ring means the tighter quad is
@@ -584,13 +689,18 @@ function preferTighter(imageData, a, b) {
   // corners cut through the bill"). Prefer whiteness when it exists,
   // unless the ink quad holds content outside it (whiteness
   // under-segmentation, e.g. glare splitting the paper blob).
-  if (a.path !== b.path) {
-    const white = a.path === "whiteness" ? a : b;
-    const ink = a.path === "whiteness" ? b : a;
-    return ringHasInk(imageData, white.quad, ink.quad) ? ink : white;
+  // Measurement beats heuristics: the quad whose sides are actually
+  // fitted to sharp document edges wins; the content-cut veto is the
+  // only override (a quad may never exclude ink the other contains).
+  const qa = a.edgeQuality ?? 0, qb = b.edgeQuality ?? 0;
+  let pref, alt;
+  if (Math.abs(qa - qb) > 0.26) { [pref, alt] = qa > qb ? [a, b] : [b, a]; }
+  else if (a.path !== b.path) {
+    [pref, alt] = a.path === "whiteness" ? [a, b] : [b, a];   // paper outline over text proxy
+  } else {
+    [pref, alt] = quadArea(a.quad) <= quadArea(b.quad) ? [a, b] : [b, a];
   }
-  const [tight, loose] = quadArea(a.quad) <= quadArea(b.quad) ? [a, b] : [b, a];
-  return ringHasInk(imageData, tight.quad, loose.quad) ? loose : tight;
+  return ringHasInk(imageData, pref.quad, alt.quad) ? alt : pref;
 }
 
 // Is there meaningful ink density in (loose minus tight)? Measured at
