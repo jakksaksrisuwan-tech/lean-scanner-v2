@@ -25,7 +25,7 @@
 // behavior => run `npm test`; improve behavior => `npm run golden:update`
 // after visual review. History: HANDOFF.md + research/.
 
-import { orderCorners, quadArea } from "./quad.js";
+import { orderCorners } from "./quad.js";
 import {
   downscaleMinMax, otsu, morph as _morph, morphOpen,
   boxSum, components, biggestComponent, convexHull,
@@ -625,7 +625,7 @@ export function detectV3(imageData, cfg) {
     consider(detectInk(imageData, cfg));
   }
   if (!decisive()) {
-    consider(floodRescue(imageData, cfg, judge));
+    consider(floodRescue(imageData, cfg));
   }
   let out = pickWinner(candidates, judge);
   if (!out) return null;
@@ -749,6 +749,16 @@ function refineSidesToEdges(mn, W, H, quad, searchOut, searchIn) {
 }
 
 
+// Point-in-quad test (ray cast), flat 8-array quad.
+function pointInQuad(q, x, y) {
+  let inside = false;
+  for (let a = 0, b = 3; a < 4; b = a++) {
+    const xi = q[a * 2], yi = q[a * 2 + 1], xj = q[b * 2], yj = q[b * 2 + 1];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
 // CONSENSUS selection. Every true candidate CONTAINS the document and
 // disagrees only about background extensions, so document ink is the
 // ink inside the candidates' intersection. Eligibility: a candidate
@@ -761,21 +771,15 @@ function pickWinner(candidates, judge) {
   if (!candidates.length) return null;
   if (candidates.length === 1) return candidates[0];
   const consensus = judge.consensusCover(candidates.map((c) => c.quad));
-  let win = null, winScore = -1;
+  let bestEligible = null, beScore = -1, bestAny = null, baScore = -1;
   for (let i = 0; i < candidates.length; i++) {
     const c = candidates[i];
-    if (consensus[i] < 0.95) continue;
     const score = c.verdict.fill * (0.55 + 0.45 * (c.edgeQuality ?? 0));
-    if (score > winScore) { winScore = score; win = c; }
+    if (score > baScore) { baScore = score; bestAny = c; }
+    if (consensus[i] >= 0.95 && score > beScore) { beScore = score; bestEligible = c; }
   }
-  // all candidates cut consensus (degenerate): fall back to best score
-  if (!win) {
-    for (const c of candidates) {
-      const score = c.verdict.fill * (0.55 + 0.45 * (c.edgeQuality ?? 0));
-      if (score > winScore) { winScore = score; win = c; }
-    }
-  }
-  return win;
+  // all candidates cutting consensus is degenerate: best raw score then
+  return bestEligible ?? bestAny;
 }
 
 // Shared 160px ink map -> judge(quad) = {cover, fill}.
@@ -825,63 +829,32 @@ function buildJudge(imageData) {
     let inkIn = 0, areaIn = 0;
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
-        let inside = false;
-        for (let a = 0, b = 3; a < 4; b = a++) {
-          const xi = q[a * 2], yi = q[a * 2 + 1], xj = q[b * 2], yj = q[b * 2 + 1];
-          if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
-        }
-        if (!inside) continue;
+        if (!pointInQuad(q, x, y)) continue;
         areaIn++;
         if (ink[y * W + x]) inkIn++;
       }
     }
     return { cover: inkTotal ? inkIn / inkTotal : 0, fill: areaIn ? inkIn / areaIn : 0 };
   };
-  // For each candidate: fraction of intersection-ink it contains.
+  // Per candidate: fraction of near-consensus ink (pixels inside a
+  // MAJORITY of candidates) that it contains.
   const consensusCover = (quads) => {
     const qs = quads.map((quad) => quad.map((v) => v * scale));
-    const inQ = (q, x, y) => {
-      let inside = false;
-      for (let a = 0, b = 3; a < 4; b = a++) {
-        const xi = q[a * 2], yi = q[a * 2 + 1], xj = q[b * 2], yj = q[b * 2 + 1];
-        if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
-      }
-      return inside;
-    };
-    let consTotal = 0;
-    const counts = new Array(qs.length).fill(0);
+    if (qs.length < 2) return qs.map(() => 1);
+    const maj = Math.ceil(qs.length / 2);
+    let majTotal = 0;
+    const majCounts = new Array(qs.length).fill(0);
     for (let y = 1; y < H - 1; y++) {
       for (let x = 1; x < W - 1; x++) {
         if (!ink[y * W + x]) continue;
-        // consensus pixel: inside ALL candidate quads
-        let inAll = true;
-        for (const q of qs) if (!inQ(q, x, y)) { inAll = false; break; }
-        if (!inAll) continue;
-        consTotal++;
-        for (let i = 0; i < qs.length; i++) counts[i]++; // by construction
+        let n = 0;
+        const inFlags = qs.map((q) => (pointInQuad(q, x, y) ? (n++, true) : false));
+        if (n < maj) continue;
+        majTotal++;
+        for (let i = 0; i < qs.length; i++) if (inFlags[i]) majCounts[i]++;
       }
     }
-    // counts[i] === consTotal for all — refine: candidate keeps consensus
-    // ink means: how much of consensus ink lies inside candidate i alone?
-    // (by definition all of it). The useful signal is vs the near-
-    // consensus: pixels inside a MAJORITY of candidates.
-    if (qs.length >= 2) {
-      const maj = Math.ceil(qs.length / 2);
-      let majTotal = 0;
-      const majCounts = new Array(qs.length).fill(0);
-      for (let y = 1; y < H - 1; y++) {
-        for (let x = 1; x < W - 1; x++) {
-          if (!ink[y * W + x]) continue;
-          let n = 0;
-          const inFlags = qs.map((q) => (inQ(q, x, y) ? (n++, true) : false));
-          if (n < maj) continue;
-          majTotal++;
-          for (let i = 0; i < qs.length; i++) if (inFlags[i]) majCounts[i]++;
-        }
-      }
-      return majCounts.map((c) => (majTotal ? c / majTotal : 1));
-    }
-    return counts.map(() => 1);
+    return majCounts.map((c) => (majTotal ? c / majTotal : 1));
   };
   return { verdict, consensusCover };
 }
@@ -913,23 +886,14 @@ function refineByCrop(imageData, cfg, first) {
   for (let i = 0; i < 8; i += 2) { r.quad[i] += x0; r.quad[i + 1] += y0; }
   // same object? sampled quad IoU against the first pass
   let inter = 0, uni = 0;
-  const inQ = (qq, x, y) => {
-    let inside = false;
-    for (let i = 0, j = 3; i < 4; j = i++) {
-      const xi = qq[i * 2], yi = qq[i * 2 + 1], xj = qq[j * 2], yj = qq[j * 2 + 1];
-      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
-    }
-    return inside;
-  };
   for (let yy = y0; yy < y1; yy += 4) {
     for (let xx = x0; xx < x1; xx += 4) {
-      const a = inQ(q, xx, yy), b = inQ(r.quad, xx, yy);
+      const a = pointInQuad(q, xx, yy), b = pointInQuad(r.quad, xx, yy);
       if (a && b) inter++;
       if (a || b) uni++;
     }
   }
   if (!uni || inter / uni < 0.6) return null;
-  r.cx += 0; r.cy += 0;
   let cx = 0, cy = 0;
   for (let i = 0; i < 4; i++) { cx += r.quad[i * 2]; cy += r.quad[i * 2 + 1]; }
   r.cx = cx / 4; r.cy = cy / 4;
@@ -937,7 +901,7 @@ function refineByCrop(imageData, cfg, first) {
   return r;
 }
 
-function floodRescue(imageData, cfg, _judge) {
+function floodRescue(imageData, cfg) {
   // Flood RESCUE: when the classic pass sees nothing, localize the
   // document basin (Gaussian-biased flood) and rerun the classic
   // detector inside the padded ROI, where its global statistics become
