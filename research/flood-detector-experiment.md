@@ -50,3 +50,34 @@ What worked: strict sharpness (kills gloss highlights) + interior-quad.
 
 Final: 81 corpus frames green incl. both former known-hards, negatives
 2/35, SRD 93.0%, ~15ms typical / ~50ms when rescue engages.
+
+## Era ablation (2026-07-23, benches/ablation.mjs)
+
+Golden-independent metrics: cover = fraction of the frame's ink inside
+the quad (content completeness); fill = ink density inside the quad
+(tightness). Both computed identically per frame, so era-vs-era
+comparison is fair even where goldens were pinned by one era.
+
+| scene         | cover base/cur | fill base/cur | verdict |
+|---------------|----------------|---------------|---------|
+| wood (x3)     | 0.36-0.47 / 0.38-0.49 | 0.22-0.26 / 0.23-0.27 | current, slight |
+| wall-steel    | 0.87 / 0.80    | 0.26 / 0.32   | current tighter, nibbles content |
+| charcoal      | 0.58 / 0.52    | 0.16 / 0.19   | current, noisy metric |
+| tile-battery  | 0.99 / 0.96    | 0.37 / 0.52   | current, much tighter |
+| gloss-battery | 1.00 / 0.88    | 0.22 / 0.29   | current tighter, nibbles |
+| white-fold    | 0.95 / 0.59    | 0.12 / 0.15   | BASELINE by a mile (diagonal cuts) |
+| bedsheet      | 0.64 / 0.57    | 0.09 / 0.13   | baseline, both weak |
+
+Interpretation: the composed pipeline pays rent on 8/10 scenes (tighter
+with minor content cost); on low-boundary-contrast scenes (white-fold,
+bedsheet) the modern pipeline's cuts drop a THIRD of the content that
+the baseline's loose blob quad kept.
+
+## Recommended next step (not yet implemented)
+
+Cover-constrained selection: keep multiple candidates through the
+pipeline (simple loose blob quad + composed result) and choose by
+maximize FILL subject to COVER >= 0.9 x best available cover. This is
+the calibrated content-guard designed right: per-frame, relative,
+measured — not a fixed ring threshold (the naive version collapsed SRD
+to 1.5%). Requires retaining a pre-polish candidate in detectWhiteness.
