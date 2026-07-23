@@ -256,7 +256,7 @@ export function detectWhiteness(imageData, cfg, strict = false) {
     }
   }
 
-  return { quad, confidence: Math.min(1, solidity), segmentation: seg, cx, cy };
+  return { quad, confidence: Math.min(1, solidity), segmentation: seg, cx, cy , path: "whiteness" };
 }
 
 // Ink-density fallback for light backgrounds (white wall, steel table):
@@ -389,7 +389,7 @@ function detectInk(imageData, cfg, strict = false) {
   const ordered = orderCorners(flat);
   let ocx = 0, ocy = 0;
   for (let i = 0; i < 4; i++) { ocx += ordered[i * 2]; ocy += ordered[i * 2 + 1]; }
-  return { quad: ordered, confidence: Math.min(1, solidity), segmentation: null, cx: ocx / 4, cy: ocy / 4 };
+  return { quad: ordered, confidence: Math.min(1, solidity), segmentation: null, cx: ocx / 4, cy: ocy / 4, path: "ink" };
 }
 
 // ── Flood localizer ─────────────────────────────────────────────────────
@@ -572,37 +572,57 @@ export function detectV3(imageData, cfg) {
   return refineByCrop(imageData, cfg, out) ?? out;
 }
 
-// Tighter-wins with an ink-preservation guard: a smaller quad is only
-// "tighter" if it still contains the document's ink — the ink path's
-// text-block hull is smaller than the paper but CLIPS logos and margins
-// (20260723_11xx receipt corpus: quads cut the header logo). Dropping
-// >3% of the looser quad's ink content disqualifies the tighter one.
+// Tighter-wins with a RING-clipping guard. The precise question is not
+// "how much total ink does each contain" (noisy) but "what lies in the
+// ring between them": a logo/text in the ring means the tighter quad is
+// cutting content (reject); a blank ring (paper margin, bg) means the
+// tighter quad is simply the more accurate boundary (take it — this is
+// what keeps corners ON the paper instead of floating in bg).
 function preferTighter(imageData, a, b) {
+  // Cross-path: whiteness measures the PAPER outline (the capture
+  // target); ink measures the text block (cuts blank margins — "lower
+  // corners cut through the bill"). Prefer whiteness when it exists,
+  // unless the ink quad holds content outside it (whiteness
+  // under-segmentation, e.g. glare splitting the paper blob).
+  if (a.path !== b.path) {
+    const white = a.path === "whiteness" ? a : b;
+    const ink = a.path === "whiteness" ? b : a;
+    return ringHasInk(imageData, white.quad, ink.quad) ? ink : white;
+  }
   const [tight, loose] = quadArea(a.quad) <= quadArea(b.quad) ? [a, b] : [b, a];
-  if (inkInQuad(imageData, tight.quad) >= 0.97 * inkInQuad(imageData, loose.quad)) return tight;
-  return loose;
+  return ringHasInk(imageData, tight.quad, loose.quad) ? loose : tight;
 }
 
-// Count of strong-gradient (ink/text) pixels inside a quad, at 160px.
-function inkInQuad(imageData, quad) {
+// Is there meaningful ink density in (loose minus tight)? Measured at
+// 160px; "meaningful" = >2% of ring pixels carry a strong gradient
+// (glyph strokes), with a small absolute floor so single noise pixels
+// never veto.
+function ringHasInk(imageData, innerQ, outerQ) {
+  // ink pixels inside outerQ but NOT innerQ (computed directly, so the
+  // quads need not be nested)
   const ds = downscaleMinMax(imageData, 160);
   const { mn, W, H, scale } = ds;
-  const q = quad.map((v) => v * scale);
-  let count = 0;
+  const qi = innerQ.map((v) => v * scale);
+  const qo = outerQ.map((v) => v * scale);
+  const inQ = (q, x, y) => {
+    let inside = false;
+    for (let a = 0, b = 3; a < 4; b = a++) {
+      const xi = q[a * 2], yi = q[a * 2 + 1], xj = q[b * 2], yj = q[b * 2 + 1];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  };
+  let ink = 0, area = 0;
   for (let y = 1; y < H - 1; y++) {
     for (let x = 1; x < W - 1; x++) {
+      if (!inQ(qo, x, y) || inQ(qi, x, y)) continue;
+      area++;
       const i = y * W + x;
       const g = Math.abs(mn[i + 1] - mn[i - 1]) + Math.abs(mn[i + W] - mn[i - W]);
-      if (g <= 40) continue;
-      let inside = false;
-      for (let a2 = 0, b2 = 3; a2 < 4; b2 = a2++) {
-        const xi = q[a2 * 2], yi = q[a2 * 2 + 1], xj = q[b2 * 2], yj = q[b2 * 2 + 1];
-        if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
-      }
-      if (inside) count++;
+      if (g > 40) ink++;
     }
   }
-  return count;
+  return ink > Math.max(6, 0.02 * Math.max(1, area));
 }
 
 // Sampled IoU of two quads over their joint bbox.
@@ -658,8 +678,8 @@ function refineByCrop(imageData, cfg, first) {
   // Refinement may tighten (shrink) even at slightly lower confidence,
   // but must never grow the quad — growth is the loose-ring failure mode.
   if (!r || r.confidence < 0.9 * first.confidence) return null;
-  const rGlobal = { quad: r.quad.map((v, i) => v + (i % 2 === 0 ? x0 : y0)) };
-  if (inkInQuad(imageData, rGlobal.quad) < 0.97 * inkInQuad(imageData, first.quad)) return null;
+  const rGlobal = r.quad.map((v, i) => v + (i % 2 === 0 ? x0 : y0));
+  if (ringHasInk(imageData, rGlobal, first.quad)) return null;
   for (let i = 0; i < 8; i += 2) { r.quad[i] += x0; r.quad[i + 1] += y0; }
   // same object? sampled quad IoU against the first pass
   let inter = 0, uni = 0;
