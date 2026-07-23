@@ -487,7 +487,9 @@ function detectInk(imageData, cfg) {
   if (solidity < 0.45) return null;
 
   // additive margin: erosion radius (7*2/2 per side ≈ 7px core loss after
-  // symmetric open, measured) + paper border beyond the outermost strokes
+  // symmetric open, measured) + paper border beyond the outermost strokes.
+  // Deliberately loose — the second-pass crop refinement in detectV3
+  // tightens it against the local boundary (see refineByCrop).
   const MARGIN = 22;
   let cx = 0, cy = 0;
   for (const [x, y] of quad) { cx += x; cy += y; }
@@ -694,11 +696,65 @@ export function detectV3(imageData, cfg) {
   // verbatim; a weak one (runaway hulls score low solidity) must beat
   // the flood-rescue in confidence to survive.
   const classic = detectClassic(imageData, cfg);
-  if (classic && classic.confidence >= 0.8) return classic;
-  const rescued = floodRescue(imageData, cfg);
-  if (classic && rescued) return rescued.confidence > classic.confidence ? rescued : classic;
-  if (classic) return classic;
-  return rescued;
+  let out;
+  if (classic && classic.confidence >= 0.8) out = classic;
+  else {
+    const rescued = floodRescue(imageData, cfg);
+    out = classic && rescued
+      ? (rescued.confidence > classic.confidence ? rescued : classic)
+      : (classic ?? rescued);
+  }
+  if (!out) return null;
+  return refineByCrop(imageData, cfg, out) ?? out;
+}
+
+// Second-pass crop refinement: re-run the detector on a crop around the
+// first quad. Refine-by-recursion, not by constraint — a loose first
+// quad (e.g. the ink path's +22px margin) is a fine localizer; inside
+// the crop the boundary is locally unambiguous and the same proven code
+// tightens it. Accepted only when it clearly matches the first result
+// (IoU >= 0.6) with confidence at least as good.
+function refineByCrop(imageData, cfg, first) {
+  const q = first.quad;
+  let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+  for (let i = 0; i < 4; i++) {
+    bx0 = Math.min(bx0, q[i * 2]); bx1 = Math.max(bx1, q[i * 2]);
+    by0 = Math.min(by0, q[i * 2 + 1]); by1 = Math.max(by1, q[i * 2 + 1]);
+  }
+  const pad = 0.15 * Math.max(bx1 - bx0, by1 - by0);
+  const x0 = Math.max(0, Math.round(bx0 - pad)), y0 = Math.max(0, Math.round(by0 - pad));
+  const x1 = Math.min(imageData.width, Math.round(bx1 + pad));
+  const y1 = Math.min(imageData.height, Math.round(by1 + pad));
+  const w = x1 - x0, h = y1 - y0;
+  if (w < 48 || h < 48) return null;
+  if (w >= imageData.width * 0.95 && h >= imageData.height * 0.95) return null;
+  const r = detectClassic(cropImage(imageData, { x0, y0, w, h }), cfg, true);
+  if (!r || r.confidence < first.confidence) return null;
+  for (let i = 0; i < 8; i += 2) { r.quad[i] += x0; r.quad[i + 1] += y0; }
+  // same object? sampled quad IoU against the first pass
+  let inter = 0, uni = 0;
+  const inQ = (qq, x, y) => {
+    let inside = false;
+    for (let i = 0, j = 3; i < 4; j = i++) {
+      const xi = qq[i * 2], yi = qq[i * 2 + 1], xj = qq[j * 2], yj = qq[j * 2 + 1];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  };
+  for (let yy = y0; yy < y1; yy += 4) {
+    for (let xx = x0; xx < x1; xx += 4) {
+      const a = inQ(q, xx, yy), b = inQ(r.quad, xx, yy);
+      if (a && b) inter++;
+      if (a || b) uni++;
+    }
+  }
+  if (!uni || inter / uni < 0.6) return null;
+  r.cx += 0; r.cy += 0;
+  let cx = 0, cy = 0;
+  for (let i = 0; i < 4; i++) { cx += r.quad[i * 2]; cy += r.quad[i * 2 + 1]; }
+  r.cx = cx / 4; r.cy = cy / 4;
+  r.segmentation = null;
+  return r;
 }
 
 function floodRescue(imageData, cfg) {
