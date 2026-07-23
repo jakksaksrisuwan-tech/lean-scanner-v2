@@ -1,6 +1,6 @@
 // Service worker for the lean-scanner PWA.
 // Offline-first: cache the app shell + modules, network-fall back.
-const CACHE = "lean-scanner-v5.4-tighter";
+const CACHE = "lean-scanner-v5.5-refactor";
 const SHELL = [
   "./",
   "./index.html",
@@ -13,10 +13,8 @@ const SHELL = [
   "./src/math/ndarray.js",
   "./src/math/svd.js",
   "./src/detector/quad.js",
-  "./src/detector/classical.js",
-  "./src/detector/v2.js",
   "./src/detector/v3.js",
-  "./src/detector/radial.js",
+  "./src/detector/primitives.js",
   "./src/dewarp/homography.js",
   "./src/dewarp/superscan.js",
   "./src/dewarp/shading.js",

@@ -86,7 +86,8 @@ Apple Vision 8.1 price-tokens/receipt · larngear 7.3 · Tesseract 4.4.
 ```
 index.html, sw.js          PWA shell (bump CACHE version on JS changes!)
 src/app.js                 UI, phases, capture, superscan collection
-src/detector/v3.js         the detector (whiteness + ink paths)
+src/detector/v3.js         detector orchestration (paths, flood, crops)
+src/detector/primitives.js shared pixel ops (morphology, components, hull)
 src/tracker/{kalman,lock}  smoothing + fire gate
 src/dewarp/                homography, shading, contrast, superscan
 src/simulator.js           real-receipt simulator (assets/sim/)

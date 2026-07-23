@@ -1,4 +1,4 @@
-// Smoke test for src/detector/v2.js — runs without DOM (Node only).
+// Synthetic smoke test for src/detector/v3.js — runs without DOM (Node only).
 //
 // We render synthetic frames with PIL+cv2 via subprocess, decode via
 // pngjs, feed the resulting ImageData shape to v2.js. Skipped if
