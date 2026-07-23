@@ -14,14 +14,20 @@ A Python mirror of the detector + math primitives lives in
 camera (native <video>, 60fps preview)
     │  one frame per detection cycle, 640px long edge
     ▼
-detector v3 (src/detector/v3.js)
-    │  scene gate: saturated bg (wood) → whiteness path
-    │              desaturated bg (steel/wall) → ink-density path
-    │  whiteness: min(R,G,B) → Otsu → open → candidate blobs
-    │             scored by boundary sharpness + brightness separation
-    │             (glare fades in, paper is a step edge)
-    │  ink: gradient density → dilate/erode → hull (text-covered docs)
-    │  corners: max-area quad on hull + least-squares side refinement
+detector v3 (src/detector/v3.js) — jury of hypotheses
+    │  generators propose candidate quads (run lazily, cheap first):
+    │    whiteness  min(R,G,B) → Otsu (recursive on trimodal scenes)
+    │               → blobs scored by boundary sharpness + separation
+    │    ink        gradient density → dilate/erode → trimmed hull
+    │               (never on saturated bgs — wood grain false-fires)
+    │    flood      Gaussian-biased basin flood localizes, detector
+    │               re-runs inside the padded ROI (stats become local)
+    │    refine     detector re-runs in a crop around the leading quad
+    │  corners: max-area hull quad + sides fitted to sharp step edges
+    │           (soft light transitions never bend a side)
+    │  judge: document ink = dense, paper-adjacent gradients inside the
+    │         candidates' consensus region; a candidate must keep ≥95%
+    │         of consensus ink; winner = fill × boundary sharpness
     ▼
 quality scorer → lock gate (8-D Kalman + N-stable-frames FSM)
     │  drift tolerance & snap thresholds relative to quad size
@@ -72,12 +78,16 @@ python3 benches/ocr_bench.py --engines vision,tesseract  # end-to-end OCR
 ```
 
 The regression corpus is every phone frame ever dumped
-(`captures-debug/`, 58 frames): each must detect, stay in-frame, and
+(`captures-debug/`, 124 frames): each must detect, stay in-frame, and
 match its pinned golden quad within 5% corner drift / 0.85 IoU. 35
-receipt-free negative crops must NOT fire (≤2 allowed). New dumps join
-the corpus automatically; `--update` pins them.
+receipt-free negative crops must NOT fire (≤2 allowed — two contain
+genuine white objects). New dumps join the corpus automatically;
+`--update` pins them AFTER visual review — pinning blind once endorsed
+a regressed quad as truth. Known-hard scenes (white-on-white folds,
+bedsheet, hand-held, glossy sofa) stay deliberately un-pinned as flags.
 
-Detection: 58/58 phone corpus, 91% SRD, ~6–20 ms/frame (Node). OCR
+Detection: 124/124 phone corpus, 92.5% SRD, ~15 ms easy scenes /
+~165 ms when the full jury convenes (Node). OCR
 baselines (SRD dewarped crops, `artifacts/bench/ocr_results.jsonl`):
 Apple Vision 8.1 price-tokens/receipt · larngear 7.3 · Tesseract 4.4.
 
@@ -86,7 +96,7 @@ Apple Vision 8.1 price-tokens/receipt · larngear 7.3 · Tesseract 4.4.
 ```
 index.html, sw.js          PWA shell (bump CACHE version on JS changes!)
 src/app.js                 UI, phases, capture, superscan collection
-src/detector/v3.js         detector orchestration (paths, flood, crops)
+src/detector/v3.js         detector: generators + consensus judge
 src/detector/primitives.js shared pixel ops (morphology, components, hull)
 src/tracker/{kalman,lock}  smoothing + fire gate
 src/dewarp/                homography, shading, contrast, superscan
@@ -102,7 +112,11 @@ HANDOFF.md                 session-by-session history
 
 - Planar homography only — curled/folded pages keep their geometric
   waviness (crease *shading* is cleaned by superscan; crease *shape*
-  would need a mesh dewarp model).
+  would need a mesh dewarp model). Baseline-flatten research is parked
+  in research/ with measured trade-offs.
+- Four known-hard scenes fail on both current and previous
+  architectures: white-on-white with deep folds, patterned bedsheet,
+  hand-held in cluttered rooms, part of the glossy-sofa corpus.
 - Python detector mirror lacks the ink-density fallback path.
 - iOS focus: no tap-to-focus API in WebKit — double-tap zoom (1x/2x/3x)
   works around min-focus-distance blur.
