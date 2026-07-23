@@ -321,6 +321,18 @@ export function detectWhiteness(imageData, cfg, strict = false) {
     // measure >= 0.75. Big blobs are exempt — SRD white-on-white receipts
     // fill the frame with soft boundaries and are still real.
     if ((strict || comp.area < 0.15 * W * H) && sharp < 0.74) continue;
+    // Strict (padded-crop) contexts: the true doc is interior to the
+    // crop by construction — a blob spanning nearly the whole crop is
+    // the background (bright bg merged with bright paper), not the doc.
+    if (strict) {
+      let wx0 = W, wx1 = 0, wy0 = H, wy1 = 0;
+      for (let i = 0; i < comp.pixels.length; i += 2) {
+        const x = comp.pixels[i], y = comp.pixels[i + 1];
+        if (x < wx0) wx0 = x; if (x > wx1) wx1 = x;
+        if (y < wy0) wy0 = y; if (y > wy1) wy1 = y;
+      }
+      if (wx1 - wx0 >= 0.88 * W && wy1 - wy0 >= 0.88 * H) continue;
+    }
     let cmx = 0, cmy = 0;
     for (let i = 0; i < comp.pixels.length; i += 2) { cmx += comp.pixels[i]; cmy += comp.pixels[i + 1]; }
     cmx /= comp.area; cmy /= comp.area;
@@ -386,7 +398,7 @@ export function detectWhiteness(imageData, cfg, strict = false) {
 // text/grid strokes while the bg is smooth. Gradient-dense blob = doc.
 // Runs at 320px (7×7 morphology is too slow at 640 in JS) and ONLY on
 // globally desaturated scenes, so gradient-rich wood grain never enters.
-function detectInk(imageData, cfg) {
+function detectInk(imageData, cfg, strict = false) {
   const ds = downscaleMinMax(imageData, 320);
   const { mn, mx, W, H, scale } = ds;
   // gradient magnitude |dx|+|dy| on the min channel
@@ -490,7 +502,11 @@ function detectInk(imageData, cfg) {
   // symmetric open, measured) + paper border beyond the outermost strokes.
   // Deliberately loose — the second-pass crop refinement in detectV3
   // tightens it against the local boundary (see refineByCrop).
-  const MARGIN = 22;
+  // In strict (rescue/refine crop) contexts the hull comes from clean
+  // local statistics — the full-frame margin guess mostly re-adds bg
+  // ring there (loose battery-pack quads). Keep it only as erosion
+  // compensation.
+  const MARGIN = strict ? 8 : 22;
   let cx = 0, cy = 0;
   for (const [x, y] of quad) { cx += x; cy += y; }
   cx /= 4; cy /= 4;
@@ -685,9 +701,9 @@ function detectClassic(imageData, cfg, strict = false) {
   const sorted = Array.from(ds.mn).sort((a, b) => a - b);
   const bgBright = sorted[sorted.length >> 1] > 95;
   if (desaturated && bgBright) {
-    return detectInk(imageData, cfg) ?? detectWhiteness(imageData, cfg, strict);
+    return detectInk(imageData, cfg, strict) ?? detectWhiteness(imageData, cfg, strict);
   }
-  return detectWhiteness(imageData, cfg, strict) ?? (desaturated ? detectInk(imageData, cfg) : null);
+  return detectWhiteness(imageData, cfg, strict) ?? (desaturated ? detectInk(imageData, cfg, strict) : null);
 }
 
 export function detectV3(imageData, cfg) {
@@ -700,12 +716,55 @@ export function detectV3(imageData, cfg) {
   if (classic && classic.confidence >= 0.8) out = classic;
   else {
     const rescued = floodRescue(imageData, cfg);
+    // Same doc (quads overlap) -> the TIGHTER quad wins: the ink path's
+    // confidence is structurally inflated (solidity of dilated ink ~1.0),
+    // so confidence only referees when the two disagree on location.
     out = classic && rescued
-      ? (rescued.confidence > classic.confidence ? rescued : classic)
+      ? (quadOverlap(classic.quad, rescued.quad) >= 0.5
+          ? (quadArea(classic.quad) <= quadArea(rescued.quad) ? classic : rescued)
+          : (rescued.confidence > classic.confidence ? rescued : classic))
       : (classic ?? rescued);
   }
   if (!out) return null;
   return refineByCrop(imageData, cfg, out) ?? out;
+}
+
+function quadArea(q) {
+  let a = 0;
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    a += q[i * 2] * q[j * 2 + 1] - q[j * 2] * q[i * 2 + 1];
+  }
+  return Math.abs(a / 2);
+}
+
+// Sampled IoU of two quads over their joint bbox.
+function quadOverlap(a, b) {
+  const inQ = (q, x, y) => {
+    let inside = false;
+    for (let i = 0, j = 3; i < 4; j = i++) {
+      const xi = q[i * 2], yi = q[i * 2 + 1], xj = q[j * 2], yj = q[j * 2 + 1];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  };
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const q of [a, b]) {
+    for (let i = 0; i < 4; i++) {
+      x0 = Math.min(x0, q[i * 2]); x1 = Math.max(x1, q[i * 2]);
+      y0 = Math.min(y0, q[i * 2 + 1]); y1 = Math.max(y1, q[i * 2 + 1]);
+    }
+  }
+  const step = Math.max(2, ((x1 - x0) + (y1 - y0)) / 80 | 0);
+  let inter = 0, uni = 0;
+  for (let y = y0; y <= y1; y += step) {
+    for (let x = x0; x <= x1; x += step) {
+      const ia = inQ(a, x, y), ib = inQ(b, x, y);
+      if (ia && ib) inter++;
+      if (ia || ib) uni++;
+    }
+  }
+  return uni ? inter / uni : 0;
 }
 
 // Second-pass crop refinement: re-run the detector on a crop around the
@@ -729,7 +788,9 @@ function refineByCrop(imageData, cfg, first) {
   if (w < 48 || h < 48) return null;
   if (w >= imageData.width * 0.95 && h >= imageData.height * 0.95) return null;
   const r = detectClassic(cropImage(imageData, { x0, y0, w, h }), cfg, true);
-  if (!r || r.confidence < first.confidence) return null;
+  // Refinement may tighten (shrink) even at slightly lower confidence,
+  // but must never grow the quad — growth is the loose-ring failure mode.
+  if (!r || r.confidence < 0.9 * first.confidence) return null;
   for (let i = 0; i < 8; i += 2) { r.quad[i] += x0; r.quad[i + 1] += y0; }
   // same object? sampled quad IoU against the first pass
   let inter = 0, uni = 0;
@@ -749,6 +810,7 @@ function refineByCrop(imageData, cfg, first) {
     }
   }
   if (!uni || inter / uni < 0.6) return null;
+  if (quadArea(r.quad) > 1.02 * quadArea(q)) return null;
   r.cx += 0; r.cy += 0;
   let cx = 0, cy = 0;
   for (let i = 0; i < 4; i++) { cx += r.quad[i * 2]; cy += r.quad[i * 2 + 1]; }

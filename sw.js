@@ -1,6 +1,6 @@
 // Service worker for the lean-scanner PWA.
 // Offline-first: cache the app shell + modules, network-fall back.
-const CACHE = "lean-scanner-v5.3-tight";
+const CACHE = "lean-scanner-v5.4-tighter";
 const SHELL = [
   "./",
   "./index.html",
