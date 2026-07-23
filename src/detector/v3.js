@@ -122,8 +122,30 @@ export function detectWhiteness(imageData, cfg, strict = false) {
   // desaturated, and often bigger than the receipt; what tells them apart
   // is the boundary: paper is a step edge (sharp ≈ 1.0), glare fades in
   // (sharp ≈ 0.6). Measured on the glare corpus of 2026-07-21.
+  let best = scoreCandidates(opened);
+  // Recursive Otsu, GATED to the sheen-merge signature: a big winner
+  // with a soft boundary (glossy leather welds gray sheen to white
+  // paper at one global cut — trimodal scene). Only then re-threshold
+  // the bright class and let the sub-candidates compete on score.
+  // Ungated this both regressed wood-glare (splits paper shading) and
+  // tripled SRD runtime.
+  if (best && best.sharp < 0.74 && best.comp.area > 0.15 * W * H) {
+    const brights = [];
+    for (let i = 0; i < W * H; i++) if (ch[i] > thr) brights.push(ch[i]);
+    if (brights.length > 500) {
+      const thr2 = otsu(Uint8Array.from(brights));
+      if (thr2 > thr + 12) {
+        const mask2 = new Uint8Array(W * H);
+        for (let i = 0; i < W * H; i++) if (ch[i] > thr2) mask2[i] = 1;
+        const b2 = scoreCandidates(morphOpen(mask2, W, H, 5));
+        if (b2 && b2.score > best.score) best = b2;
+      }
+    }
+  }
+
+  function scoreCandidates(openedMask) {
   let best = null;
-  for (const comp of components(opened, W, H, 5)) {
+  for (const comp of components(openedMask, W, H, 5)) {
     if (comp.area < 0.02 * W * H) break;      // sorted desc — rest are smaller
     if (comp.area > 0.90 * W * H) continue;   // whole-frame blob: nothing to align
 
@@ -146,8 +168,8 @@ export function detectWhiteness(imageData, cfg, strict = false) {
     for (let i = 0; i < comp.pixels.length; i += 2) {
       const x = comp.pixels[i], y = comp.pixels[i + 1];
       if (x === 0 || y === 0 || x === W - 1 || y === H - 1 ||
-          !opened[(y - 1) * W + x] || !opened[(y + 1) * W + x] ||
-          !opened[y * W + x - 1] || !opened[y * W + x + 1]) {
+          !openedMask[(y - 1) * W + x] || !openedMask[(y + 1) * W + x] ||
+          !openedMask[y * W + x - 1] || !openedMask[y * W + x + 1]) {
         boundary.push(x, y);
       }
     }
@@ -205,7 +227,9 @@ export function detectWhiteness(imageData, cfg, strict = false) {
     cmx /= comp.area; cmy /= comp.area;
     const dc = Math.hypot(cmx - W / 2, cmy - H / 2) / (0.5 * Math.hypot(W, H));
     const score = (2 * sharp + Math.min(1.5, sep / 100)) * (1 - 0.4 * dc);
-    if (!best || score > best.score) best = { comp, boundary, score };
+    if (!best || score > best.score) best = { comp, boundary, score, sharp };
+  }
+  return best;
   }
   if (!best) return null;
   const { comp, boundary } = best;
