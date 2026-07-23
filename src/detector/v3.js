@@ -664,6 +664,16 @@ function refineSidesToEdges(mn, W, H, quad, searchOut, searchIn) {
         use = kept;
       }
     }
+    // Angle guard: refinement may TRANSLATE a side, not rotate it away —
+    // the segmentation already knows the side's orientation. A fit
+    // rotated >12 deg from the seed has latched onto other structure
+    // (fold shadows are sharp steps INSIDE the paper, diagonal to the
+    // side; 20260723_120x corpus produced diagonal cuts at quality 1.0).
+    const dot = Math.abs(coef.nx * nx + coef.ny * ny);
+    if (dot < 0.978) {   // cos(12 deg)
+      lines.push({ nx: nx, ny: ny, d: nx * ax + ny * ay, fit: false });
+      continue;
+    }
     lines.push({ ...coef, fit: true });
     fitted++;
   }
