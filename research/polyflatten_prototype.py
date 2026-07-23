@@ -10,10 +10,20 @@ MEASURED on 174 SRD dewarped crops (Apple Vision OCR):
   flat receipts with sparse/columnar text get damaged (0.80->0.57) —
   strip correlation mistakes price columns for curl.
 
-To ship this it needs an is-actually-curled gate (correlation peak
-quality + low residual of shifts vs the polynomial) so it only fires on
-the curled tail. Vision is already curl-tolerant; weaker OCR engines
-(tesseract-class) would benefit more — revisit if the OCR engine changes.
+Gate attempts, all FAILED on measurement:
+  - residual-vs-polynomial (smoothness): rotation produces perfectly
+    smooth linear dy(x) — the worst losers are the smoothest signals.
+  - linear/nonlinear decomposition (rotation vs curl): correlation
+    drift on rotated/columnar receipts masquerades as nonlinear curl
+    (loser 1108: "nonlinear" 18.7px; gainer 1067: 3.9px). The strip
+    estimate itself is the unreliable part, so no gate on it can work.
+
+To ship this needs per-line baseline fitting (cluster glyphs into text
+lines, fit each baseline) instead of strip correlation — a bigger build.
+Field reality check: the app's use case is table-top scanning; the
+user's own captures measure 2-5px curl (noise). Park until real curled
+captures show up, or the OCR engine becomes weaker than Apple Vision
+(geometric normalization helps weak engines far more).
 
 Usage: python3 research/polyflatten_prototype.py in.png out.png
 """
