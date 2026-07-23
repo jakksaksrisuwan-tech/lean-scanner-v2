@@ -83,6 +83,28 @@ function morphOpen(mask, W, H, k) {
   return _morph(_morph(mask, W, H, k, true), W, H, k, false);
 }
 
+// Windowed sum of a 0/1 mask via prefix sums (radius r box).
+function boxSum(mask, W, H, r) {
+  const pre = new Int32Array((W + 1) * (H + 1));
+  for (let y = 0; y < H; y++) {
+    let rowAcc = 0;
+    for (let x = 0; x < W; x++) {
+      rowAcc += mask[y * W + x];
+      pre[(y + 1) * (W + 1) + x + 1] = pre[y * (W + 1) + x + 1] + rowAcc;
+    }
+  }
+  const out = new Int32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(H - 1, y + r) + 1;
+    for (let x = 0; x < W; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(W - 1, x + r) + 1;
+      out[y * W + x] = pre[y1 * (W + 1) + x1] - pre[y0 * (W + 1) + x1]
+                     - pre[y1 * (W + 1) + x0] + pre[y0 * (W + 1) + x0];
+    }
+  }
+  return out;
+}
+
 // 8-connected components, largest first (top `max`); each { pixels, area }.
 function components(mask, W, H, max = 5) {
   const label = new Int32Array(W * H); // 0 = unvisited
@@ -299,7 +321,11 @@ export function detectWhiteness(imageData, cfg) {
     // measure >= 0.75. Big blobs are exempt — SRD white-on-white receipts
     // fill the frame with soft boundaries and are still real.
     if (comp.area < 0.15 * W * H && sharp < 0.74) continue;
-    const score = 2 * sharp + Math.min(1.5, sep / 100);
+    let cmx = 0, cmy = 0;
+    for (let i = 0; i < comp.pixels.length; i += 2) { cmx += comp.pixels[i]; cmy += comp.pixels[i + 1]; }
+    cmx /= comp.area; cmy /= comp.area;
+    const dc = Math.hypot(cmx - W / 2, cmy - H / 2) / (0.5 * Math.hypot(W, H));
+    const score = (2 * sharp + Math.min(1.5, sep / 100)) * (1 - 0.4 * dc);
     if (!best || score > best.score) best = { comp, boundary, score };
   }
   if (!best) return null;
@@ -383,10 +409,66 @@ function detectInk(imageData, cfg) {
   const ink = new Uint8Array(W * H);
   for (let i = 0; i < mag.length; i++) if (mag[i] > thr) ink[i] = 1;
 
+  // Density filter: text is gradient-DENSE (packed glyphs), while tile
+  // grout, cables, and table edges are isolated high-gradient LINES.
+  // Drop ink pixels whose 17px neighborhood is mostly empty — otherwise
+  // dilation welds grout lines into the doc blob and the hull runs away
+  // along the seams (20260723 battery-pack-on-tile corpus).
+  // Wide window: a grout/cable NETWORK stays sparse at 33px scale while a
+  // document region (glyphs + rules mixed) stays moderately dense. Small
+  // windows can't tell a grout line from a form's grid line — both are
+  // thin — so the context radius is what separates them.
+  const dens = boxSum(ink, W, H, 16);
+  const area33 = 33 * 33;
+  for (let i = 0; i < ink.length; i++) {
+    if (ink[i] && dens[i] < 0.09 * area33) ink[i] = 0;
+  }
+
   const big = _morph(_morph(ink, W, H, 7, false), W, H, 7, false);   // dilate x2
   const core = _morph(_morph(big, W, H, 7, true), W, H, 7, true);    // erode x2
-  const comp = biggestComponent(core, W, H);
-  if (!comp || comp.area < 0.02 * W * H || comp.area > 0.90 * W * H) return null;
+  // Candidate selection with a soft center prior: the user aims the
+  // subject roughly at the frame center; a same-sized blob at the edge
+  // (tile seams, table edge) loses to a centered one, but a decisively
+  // bigger off-center blob still wins (prior, not constraint).
+  let comp = null, bestScore = -1;
+  for (const c of components(core, W, H, 5)) {
+    if (c.area < 0.02 * W * H) break;
+    if (c.area > 0.90 * W * H) continue;
+    let mx = 0, my = 0;
+    for (let i = 0; i < c.pixels.length; i += 2) { mx += c.pixels[i]; my += c.pixels[i + 1]; }
+    mx /= c.area; my /= c.area;
+    const dc = Math.hypot(mx - W / 2, my - H / 2) / (0.5 * Math.hypot(W, H));
+    const score = c.area * (1 - 0.7 * dc);
+    if (score > bestScore) { bestScore = score; comp = c; }
+  }
+  if (!comp) return null;
+  // Mahalanobis trim: a grout/cable tail welded to the doc blob is a
+  // small pixel mass far from the blob's center — clip >2.5 sigma before
+  // the hull so maxAreaQuad can't pick tail points as corners.
+  // Iterated: a heavy tail inflates the covariance on pass 1, hiding
+  // itself; re-estimating on the trimmed set converges in 2-3 passes.
+  for (let pass = 0; pass < 3; pass++) {
+    let mx = 0, my = 0;
+    for (let i = 0; i < comp.pixels.length; i += 2) { mx += comp.pixels[i]; my += comp.pixels[i + 1]; }
+    mx /= comp.area; my /= comp.area;
+    let sxx = 0, sxy = 0, syy = 0;
+    for (let i = 0; i < comp.pixels.length; i += 2) {
+      const ex = comp.pixels[i] - mx, ey = comp.pixels[i + 1] - my;
+      sxx += ex * ex; sxy += ex * ey; syy += ey * ey;
+    }
+    sxx /= comp.area; sxy /= comp.area; syy /= comp.area;
+    const det = sxx * syy - sxy * sxy;
+    if (det <= 1e-6) break;
+    const i11 = syy / det, i12 = -sxy / det, i22 = sxx / det;
+    const kept = [];
+    for (let i = 0; i < comp.pixels.length; i += 2) {
+      const ex = comp.pixels[i] - mx, ey = comp.pixels[i + 1] - my;
+      const d2 = ex * (i11 * ex + i12 * ey) + ey * (i12 * ex + i22 * ey);
+      if (d2 <= 2.5 * 2.5) kept.push(comp.pixels[i], comp.pixels[i + 1]);
+    }
+    if (kept.length < 16 || kept.length === comp.pixels.length) break;
+    comp = { pixels: kept, area: kept.length / 2 };
+  }
 
   // hull over ORIGINAL ink pixels inside the core component (undilated
   // points keep steel-scratch bloat out of the corners)
