@@ -32,3 +32,21 @@ Not a replacement. Two viable roles:
    Combines flood's scene-robustness with production corner precision.
 
 Prototype: research/flood_prototype.py (offline, cv2).
+
+## Outcome (shipped as v5.0, 2026-07-23)
+
+The hybrid landed as flood-RESCUE with confidence arbitration:
+1. classic full-frame runs first; confident results (>=0.8) return verbatim
+2. weak/null classic -> floodLocalize (bucket-queue, 160px, rectangularity
+   waterline) -> padded ROI crop -> classic detector re-run INSIDE the crop
+   in strict mode (sharpness floor for all blob sizes) -> higher confidence
+   wins
+3. rescue acceptance also requires the quad interior to the crop (the 25%
+   ROI pad guarantees a true doc fits; clipped slivers = zipper bands etc.)
+
+Rejected during calibration: ink-fraction gate (zipper teeth measure 0.32,
+denser than receipts); depth-of-basin gate (positives/negatives overlap).
+What worked: strict sharpness (kills gloss highlights) + interior-quad.
+
+Final: 81 corpus frames green incl. both former known-hards, negatives
+2/35, SRD 93.0%, ~15ms typical / ~50ms when rescue engages.

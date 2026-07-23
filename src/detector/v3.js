@@ -238,7 +238,7 @@ function refineQuad(quad, boundary) {
   return out;
 }
 
-export function detectWhiteness(imageData, cfg) {
+export function detectWhiteness(imageData, cfg, strict = false) {
   const ds = downscaleMinMax(imageData, cfg.longEdge);
   const { mn: ch, mx, W, H, scale } = ds;
 
@@ -320,7 +320,7 @@ export function detectWhiteness(imageData, cfg) {
     // negatives corpus is small AND soft (sharp <= 0.72); real receipts
     // measure >= 0.75. Big blobs are exempt — SRD white-on-white receipts
     // fill the frame with soft boundaries and are still real.
-    if (comp.area < 0.15 * W * H && sharp < 0.74) continue;
+    if ((strict || comp.area < 0.15 * W * H) && sharp < 0.74) continue;
     let cmx = 0, cmy = 0;
     for (let i = 0; i < comp.pixels.length; i += 2) { cmx += comp.pixels[i]; cmy += comp.pixels[i + 1]; }
     cmx /= comp.area; cmy /= comp.area;
@@ -507,7 +507,162 @@ function detectInk(imageData, cfg) {
   return { quad: ordered, confidence: Math.min(1, solidity), segmentation: null, cx: ocx / 4, cy: ocy / 4 };
 }
 
-export function detectV3(imageData, cfg) {
+// ── Flood localizer ─────────────────────────────────────────────────────
+// Gaussian-biased basin flood at 160px: documentness evidence (whiteness
+// OR ink density) weighted by a centered Gaussian prior forms a "dip";
+// flood from the deepest point by descending energy; the waterline is the
+// flood size whose puddle is most convex-rectangular (overflood grows
+// tentacles, killing the score; floods hugging 2+ frame borders are
+// rejected). Returns a padded full-res ROI, or null.
+//
+// The ROI's purpose is to turn the classic detector's GLOBAL statistics
+// (Otsu, scene gate, bg median) into LOCAL ones — inside the crop the bg
+// is just the document's immediate surroundings, so thresholds are
+// bimodal by construction. See research/flood-detector-experiment.md.
+function floodLocalize(imageData) {
+  const ds = downscaleMinMax(imageData, 160);
+  const { mn, mx, W, H, scale } = ds;
+  const n = W * H;
+
+  // evidence = max(whiteness, ink-density)
+  const mag = new Float32Array(n);
+  const bins = new Int32Array(256);
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      const m = Math.abs(mn[i + 1] - mn[i - 1]) + Math.abs(mn[i + W] - mn[i - W]);
+      mag[i] = m;
+      bins[Math.min(255, m | 0)]++;
+    }
+  }
+  let acc = 0, p92 = 30;
+  for (let b = 0; b < 256; b++) { acc += bins[b]; if (acc >= 0.92 * n) { p92 = b; break; } }
+  const thr = Math.max(30, p92);
+  const ink = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (mag[i] > thr) ink[i] = 1;
+  const dens = boxSum(ink, W, H, 6);
+  const densCap = 0.30 * 13 * 13;
+  const cx = W / 2, cy = H / 2;
+  const sig2 = (0.45 * Math.min(W, H)) ** 2;
+  const level = new Uint8Array(n); // quantized energy 0..255
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      const satP = mx[i] > 0 ? (mx[i] - mn[i]) / mx[i] : 0;
+      const wn = (mn[i] / 255) * (1 - satP);
+      const di = Math.min(1, dens[i] / densCap);
+      const ev = Math.max(wn, 0.9 * di);
+      const g = Math.exp(-0.5 * ((x - cx) * (x - cx) + (y - cy) * (y - cy)) / sig2);
+      level[i] = Math.min(255, Math.round(255 * ev * (0.35 + 0.65 * g)));
+    }
+  }
+
+  // bucket-queue flood from the global max, popping highest-energy frontier
+  let seed = 0;
+  for (let i = 0; i < n; i++) if (level[i] > level[seed]) seed = i;
+  const buckets = Array.from({ length: 256 }, () => []);
+  const visited = new Uint8Array(n);
+  buckets[level[seed]].push(seed);
+  visited[seed] = 1;
+  let top = level[seed];
+  const order = new Int32Array(n);
+  let m = 0;
+  while (m < n) {
+    while (top > 0 && buckets[top].length === 0) top--;
+    if (buckets[top].length === 0) break;
+    const i = buckets[top].pop();
+    order[m++] = i;
+    const x = i % W, y = (i / W) | 0;
+    for (let k = 0; k < 4; k++) {
+      const nx = x + (k === 0 ? 1 : k === 1 ? -1 : 0);
+      const ny = y + (k === 2 ? 1 : k === 3 ? -1 : 0);
+      if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      const j = ny * W + nx;
+      if (!visited[j]) {
+        visited[j] = 1;
+        buckets[level[j]].push(j);
+        if (level[j] > top) top = level[j];
+      }
+    }
+  }
+
+  // waterline sweep: most convex-compact puddle wins
+  const minA = (0.03 * n) | 0, maxA = Math.min(m, (0.55 * n) | 0);
+  const mask = new Uint8Array(n);
+  let idx = 0, bestScore = -1, bestBox = null;
+  for (let c = 0; c < 50; c++) {
+    const target = (minA + (maxA - minA) * (c / 49)) | 0;
+    while (idx < target) mask[order[idx++]] = 1;
+    const comp = biggestComponent(mask, W, H);
+    if (!comp || comp.area < minA) continue;
+    let x0 = W, y0 = H, x1 = 0, y1 = 0;
+    for (let i = 0; i < comp.pixels.length; i += 2) {
+      const x = comp.pixels[i], y = comp.pixels[i + 1];
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    const borders = (x0 <= 1 ? 1 : 0) + (y0 <= 1 ? 1 : 0) + (x1 >= W - 2 ? 1 : 0) + (y1 >= H - 2 ? 1 : 0);
+    if (borders >= 2) continue;
+    const hull = convexHull(comp.pixels);
+    if (hull.length < 3) continue;
+    let ha = 0;
+    for (let i = 0; i < hull.length; i++) {
+      const [ax, ay] = hull[i], [bx, by] = hull[(i + 1) % hull.length];
+      ha += ax * by - bx * ay;
+    }
+    ha = Math.abs(ha / 2);
+    const score = comp.area / Math.max(1, ha);
+    if (score > bestScore) { bestScore = score; bestBox = { x0, y0, x1, y1 }; }
+  }
+  if (!bestBox) return null;
+
+  // padded full-res ROI (25% pad so the doc stays well under the classic
+  // path's 90%-of-frame cap and local bg stats have material)
+  const bw = bestBox.x1 - bestBox.x0, bh = bestBox.y1 - bestBox.y0;
+  const px = Math.max(6, 0.25 * bw), py = Math.max(6, 0.25 * bh);
+  const fx0 = Math.max(0, Math.round((bestBox.x0 - px) / scale));
+  const fy0 = Math.max(0, Math.round((bestBox.y0 - py) / scale));
+  const fx1 = Math.min(imageData.width, Math.round((bestBox.x1 + px) / scale));
+  const fy1 = Math.min(imageData.height, Math.round((bestBox.y1 + py) / scale));
+  if (fx1 - fx0 < 32 || fy1 - fy0 < 32) return null;
+  return { x0: fx0, y0: fy0, w: fx1 - fx0, h: fy1 - fy0 };
+}
+
+// Fraction of pixels inside `quad` (crop coords) with a strong
+// min-channel gradient — text/print evidence, sampled at 160px.
+function inkFraction(imageData, quad) {
+  const ds = downscaleMinMax(imageData, 160);
+  const { mn, W, H, scale } = ds;
+  const q = quad.map((v) => v * scale);
+  let ink = 0, tot = 0;
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      let inside = false;
+      for (let i = 0, j = 3; i < 4; j = i++) {
+        const xi = q[i * 2], yi = q[i * 2 + 1], xj = q[j * 2], yj = q[j * 2 + 1];
+        if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+      }
+      if (!inside) continue;
+      tot++;
+      const i = y * W + x;
+      const g = Math.abs(mn[i + 1] - mn[i - 1]) + Math.abs(mn[i + W] - mn[i - W]);
+      if (g > 40) ink++;
+    }
+  }
+  return tot ? ink / tot : 0;
+}
+
+function cropImage(imageData, roi) {
+  const out = new Uint8ClampedArray(roi.w * roi.h * 4);
+  const src = imageData.data, sw = imageData.width;
+  for (let y = 0; y < roi.h; y++) {
+    const srcOff = ((y + roi.y0) * sw + roi.x0) * 4;
+    out.set(src.subarray(srcOff, srcOff + roi.w * 4), y * roi.w * 4);
+  }
+  return { width: roi.w, height: roi.h, data: out };
+}
+
+function detectClassic(imageData, cfg, strict = false) {
   // Scene gate: on globally desaturated scenes (steel table, white wall)
   // the whiteness signal is meaningless — paper is no brighter or whiter
   // than the bg — so the ink-density path leads and whiteness is the
@@ -528,7 +683,48 @@ export function detectV3(imageData, cfg) {
   const sorted = Array.from(ds.mn).sort((a, b) => a - b);
   const bgBright = sorted[sorted.length >> 1] > 95;
   if (desaturated && bgBright) {
-    return detectInk(imageData, cfg) ?? detectWhiteness(imageData, cfg);
+    return detectInk(imageData, cfg) ?? detectWhiteness(imageData, cfg, strict);
   }
-  return detectWhiteness(imageData, cfg) ?? (desaturated ? detectInk(imageData, cfg) : null);
+  return detectWhiteness(imageData, cfg, strict) ?? (desaturated ? detectInk(imageData, cfg) : null);
+}
+
+export function detectV3(imageData, cfg) {
+  // Classic full-frame first — every pinned golden and the 2/35 negative
+  // record were earned by this path. A CONFIDENT classic result returns
+  // verbatim; a weak one (runaway hulls score low solidity) must beat
+  // the flood-rescue in confidence to survive.
+  const classic = detectClassic(imageData, cfg);
+  if (classic && classic.confidence >= 0.8) return classic;
+  const rescued = floodRescue(imageData, cfg);
+  if (classic && rescued) return rescued.confidence > classic.confidence ? rescued : classic;
+  if (classic) return classic;
+  return rescued;
+}
+
+function floodRescue(imageData, cfg) {
+  // Flood RESCUE: when the classic pass sees nothing, localize the
+  // document basin (Gaussian-biased flood) and rerun the classic
+  // detector inside the padded ROI, where its global statistics become
+  // local (bimodal by construction). A confidence bar keeps the local
+  // gates — more permissive on garbage — from re-admitting empty scenes.
+  const roi = floodLocalize(imageData);
+  if (!roi || (roi.w >= imageData.width && roi.h >= imageData.height)) return null;
+  const crop = cropImage(imageData, roi);
+  // strict: the sharpness floor applies to ALL blob sizes in a rescue
+  // crop — zooming makes any object big enough to dodge the small-blob
+  // floor, and soft-boundary gloss highlights (leather bag, measured
+  // sharp~0.5 at conf 0.88) are exactly what the floor exists to reject.
+  const r = detectClassic(crop, cfg, true);
+  if (!r || r.confidence < 0.75) return null;
+  // The ROI is padded 25% so a true document sits interior to the crop;
+  // a quad touching the crop edge is a clipped partial structure (zipper
+  // band, table edge) that leaked through the local gates.
+  for (let i = 0; i < 4; i++) {
+    if (r.quad[i * 2] < 3 || r.quad[i * 2] > crop.width - 3 ||
+        r.quad[i * 2 + 1] < 3 || r.quad[i * 2 + 1] > crop.height - 3) return null;
+  }
+  for (let i = 0; i < 8; i += 2) { r.quad[i] += roi.x0; r.quad[i + 1] += roi.y0; }
+  r.cx += roi.x0; r.cy += roi.y0;
+  r.segmentation = null; // grid was crop-relative; UI treats null as "skip"
+  return r;
 }
