@@ -239,6 +239,16 @@ function whiten(rgb, W, H) {
   const n = W * H;
   const gray = new Float32Array(n);
   for (let i = 0; i < n; i++) gray[i] = (rgb[i * 3] + rgb[i * 3 + 1] + rgb[i * 3 + 2]) / 3;
+  // Skin veto: document ink is gray/black (desaturated); a finger over
+  // the paper is SATURATED (skin tone). Saturated pixels are never ink,
+  // so the paper-fill paints fingertips out of the margins. (Text under
+  // a finger is occluded — only a multi-frame grip shift recovers it.)
+  const skin = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+    const mx = Math.max(r, g, b), mnv = Math.min(r, g, b);
+    if (mx > 0 && (mx - mnv) / mx > 0.22 && r > b) skin[i] = 1;
+  }
   const win = 12; // ~2x text stroke spacing at receipt scale
   const mu = boxBlur3(gray, W, H, win);
   const g2 = new Float32Array(n);
@@ -250,6 +260,7 @@ function whiten(rgb, W, H) {
     const thr = mu[i] * (1 + 0.18 * (sd / 128 - 1));
     ink[i] = Math.min(1, Math.max(0, (thr - gray[i]) / Math.max(0.35 * sd + 6, 1)));
   }
+  for (let i = 0; i < n; i++) if (skin[i]) ink[i] = 0;
   const inkSoft = boxBlur3(maxFilter(ink, W, H, 1), W, H, 1); // keep glyph edges
   const out = new Uint8ClampedArray(n * 3);
   for (let c = 0; c < 3; c++) {
