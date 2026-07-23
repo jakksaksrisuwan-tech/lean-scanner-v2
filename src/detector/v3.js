@@ -580,28 +580,55 @@ function detectClassic(imageData, cfg, strict = false) {
 }
 
 export function detectV3(imageData, cfg) {
-  // Classic full-frame first — every pinned golden and the 2/35 negative
-  // record were earned by this path. A CONFIDENT classic result returns
-  // verbatim; a weak one (runaway hulls score low solidity) must beat
-  // the flood-rescue in confidence to survive.
-  const classic = detectClassic(imageData, cfg);
-  let out;
-  if (classic && classic.confidence >= 0.8) out = classic;
-  else {
-    const rescued = floodRescue(imageData, cfg);
-    // Same doc (quads overlap) -> the TIGHTER quad wins: the ink path's
-    // confidence is structurally inflated (solidity of dilated ink ~1.0),
-    // so confidence only referees when the two disagree on location.
-    out = classic && rescued
-      ? (quadOverlap(classic.quad, rescued.quad) >= 0.5
-          ? preferTighter(imageData, classic, rescued)
-          : (rescued.confidence > classic.confidence ? rescued : classic))
-      : (classic ?? rescued);
-  }
-  if (!out) return null;
-  return refineByCrop(imageData, cfg, out) ?? out;
-}
+  // JURY OF HYPOTHESES. Generators propose candidate quads; one judge
+  // (cover x fill on a shared ink map) selects. Routing gates survive
+  // only as lazy-generation cost control — they no longer decide
+  // correctness, so a mis-gated scene degrades to "runs one more
+  // generator" instead of "polishes the wrong hypothesis".
+  //
+  //   cover = fraction of the frame's ink inside the quad (completeness)
+  //   fill  = ink density inside the quad (tightness)
+  //   winner = max fill among candidates with cover >= 0.9 x best cover
+  //
+  // Cost: the judge is point-in-quad over a 160px map (~1-2ms/candidate,
+  // map built once); generators are the expensive part and run lazily.
+  const judge = buildJudge(imageData);
+  const candidates = [];
+  const consider = (r) => { if (r) { r.verdict = judge(r.quad); candidates.push(r); } };
 
+  // scene stats for lazy-generation decisions only
+  const ds = downscaleMinMax(imageData, 64);
+  let satSum = 0;
+  for (let i = 0; i < ds.mn.length; i++) satSum += ds.mx[i] > 0 ? (ds.mx[i] - ds.mn[i]) / ds.mx[i] : 0;
+  const desaturated = satSum / ds.mn.length <= 0.30;
+
+  consider(detectWhiteness(imageData, cfg));
+  // verdict-based laziness: summon more witnesses only on ambiguity
+  const decisive = () => {
+    const b = pickWinner(candidates);
+    return b && b.verdict.cover >= 0.88 && b.verdict.fill >= 0.12;
+  };
+  // INVARIANT (oldest in the codebase): ink NEVER runs on saturated
+  // scenes — wood grain is gradient-dense and false-fires it. Lazy
+  // generation must respect correctness invariants; only genuine
+  // routing heuristics moved into the jury.
+  if (!decisive() && desaturated) {
+    consider(detectInk(imageData, cfg));
+  }
+  if (!decisive()) {
+    consider(floodRescue(imageData, cfg, judge));
+  }
+  let out = pickWinner(candidates);
+  if (!out) return null;
+  // refinement is one more juror: accepted only if the judge prefers it
+  const refined = refineByCrop(imageData, cfg, out);
+  if (refined) {
+    refined.verdict = judge(refined.quad);
+    if (refined.verdict.cover >= 0.97 * out.verdict.cover
+        && refined.verdict.fill >= out.verdict.fill) out = refined;
+  }
+  return out;
+}
 
 // ── Unified boundary refinement (the composition keystone) ──────────────
 // Fit each quad side to SHARP step edges of the min-channel — the three
@@ -711,91 +738,56 @@ function refineSidesToEdges(mn, W, H, quad, searchOut, searchIn) {
   return { quad: out, quality: fitted / 4 };
 }
 
-// Tighter-wins with a RING-clipping guard. The precise question is not
-// "how much total ink does each contain" (noisy) but "what lies in the
-// ring between them": a logo/text in the ring means the tighter quad is
-// cutting content (reject); a blank ring (paper margin, bg) means the
-// tighter quad is simply the more accurate boundary (take it — this is
-// what keeps corners ON the paper instead of floating in bg).
-function preferTighter(imageData, a, b) {
-  // Cross-path: whiteness measures the PAPER outline (the capture
-  // target); ink measures the text block (cuts blank margins — "lower
-  // corners cut through the bill"). Prefer whiteness when it exists,
-  // unless the ink quad holds content outside it (whiteness
-  // under-segmentation, e.g. glare splitting the paper blob).
-  // Measurement beats heuristics: the quad whose sides are actually
-  // fitted to sharp document edges wins; the content-cut veto is the
-  // only override (a quad may never exclude ink the other contains).
-  const qa = a.edgeQuality ?? 0, qb = b.edgeQuality ?? 0;
-  let pref, alt;
-  if (Math.abs(qa - qb) > 0.26) { [pref, alt] = qa > qb ? [a, b] : [b, a]; }
-  else if (a.path !== b.path) {
-    [pref, alt] = a.path === "whiteness" ? [a, b] : [b, a];   // paper outline over text proxy
-  } else {
-    [pref, alt] = quadArea(a.quad) <= quadArea(b.quad) ? [a, b] : [b, a];
+
+function pickWinner(candidates) {
+  if (!candidates.length) return null;
+  let bestCover = 0;
+  for (const c of candidates) bestCover = Math.max(bestCover, c.verdict.cover);
+  let win = null;
+  for (const c of candidates) {
+    if (c.verdict.cover < 0.9 * bestCover) continue;   // dropped content: ineligible
+    if (!win || c.verdict.fill > win.verdict.fill) win = c;
   }
-  return ringHasInk(imageData, pref.quad, alt.quad) ? alt : pref;
+  return win;
 }
 
-// Is there meaningful ink density in (loose minus tight)? Measured at
-// 160px; "meaningful" = >2% of ring pixels carry a strong gradient
-// (glyph strokes), with a small absolute floor so single noise pixels
-// never veto.
-function ringHasInk(imageData, innerQ, outerQ) {
-  // ink pixels inside outerQ but NOT innerQ (computed directly, so the
-  // quads need not be nested)
+// Shared 160px ink map -> judge(quad) = {cover, fill}.
+function buildJudge(imageData) {
   const ds = downscaleMinMax(imageData, 160);
   const { mn, W, H, scale } = ds;
-  const qi = innerQ.map((v) => v * scale);
-  const qo = outerQ.map((v) => v * scale);
-  const inQ = (q, x, y) => {
-    let inside = false;
-    for (let a = 0, b = 3; a < 4; b = a++) {
-      const xi = q[a * 2], yi = q[a * 2 + 1], xj = q[b * 2], yj = q[b * 2 + 1];
-      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
-    }
-    return inside;
-  };
-  let ink = 0, area = 0;
+  const ink = new Uint8Array(W * H);
+  let inkTotal = 0;
   for (let y = 1; y < H - 1; y++) {
     for (let x = 1; x < W - 1; x++) {
-      if (!inQ(qo, x, y) || inQ(qi, x, y)) continue;
-      area++;
       const i = y * W + x;
       const g = Math.abs(mn[i + 1] - mn[i - 1]) + Math.abs(mn[i + W] - mn[i - W]);
-      if (g > 40) ink++;
+      if (g > 40) { ink[i] = 1; inkTotal++; }
     }
   }
-  return ink > Math.max(6, 0.02 * Math.max(1, area));
-}
-
-// Sampled IoU of two quads over their joint bbox.
-function quadOverlap(a, b) {
-  const inQ = (q, x, y) => {
-    let inside = false;
-    for (let i = 0, j = 3; i < 4; j = i++) {
-      const xi = q[i * 2], yi = q[i * 2 + 1], xj = q[j * 2], yj = q[j * 2 + 1];
-      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
-    }
-    return inside;
-  };
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const q of [a, b]) {
+  return (quad) => {
+    const q = quad.map((v) => v * scale);
+    let qx0 = W, qx1 = 0, qy0 = H, qy1 = 0;
     for (let i = 0; i < 4; i++) {
-      x0 = Math.min(x0, q[i * 2]); x1 = Math.max(x1, q[i * 2]);
-      y0 = Math.min(y0, q[i * 2 + 1]); y1 = Math.max(y1, q[i * 2 + 1]);
+      qx0 = Math.min(qx0, q[i * 2]); qx1 = Math.max(qx1, q[i * 2]);
+      qy0 = Math.min(qy0, q[i * 2 + 1]); qy1 = Math.max(qy1, q[i * 2 + 1]);
     }
-  }
-  const step = Math.max(2, ((x1 - x0) + (y1 - y0)) / 80 | 0);
-  let inter = 0, uni = 0;
-  for (let y = y0; y <= y1; y += step) {
-    for (let x = x0; x <= x1; x += step) {
-      const ia = inQ(a, x, y), ib = inQ(b, x, y);
-      if (ia && ib) inter++;
-      if (ia || ib) uni++;
+    const y0 = Math.max(1, qy0 | 0), y1 = Math.min(H - 1, (qy1 + 1) | 0);
+    const x0 = Math.max(1, qx0 | 0), x1 = Math.min(W - 1, (qx1 + 1) | 0);
+    let inkIn = 0, areaIn = 0;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        let inside = false;
+        for (let a = 0, b = 3; a < 4; b = a++) {
+          const xi = q[a * 2], yi = q[a * 2 + 1], xj = q[b * 2], yj = q[b * 2 + 1];
+          if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+        }
+        if (!inside) continue;
+        areaIn++;
+        if (ink[y * W + x]) inkIn++;
+      }
     }
-  }
-  return uni ? inter / uni : 0;
+    return { cover: inkTotal ? inkIn / inkTotal : 0, fill: areaIn ? inkIn / areaIn : 0 };
+  };
 }
 
 // Second-pass crop refinement: re-run the detector on a crop around the
@@ -819,11 +811,9 @@ function refineByCrop(imageData, cfg, first) {
   if (w < 48 || h < 48) return null;
   if (w >= imageData.width * 0.95 && h >= imageData.height * 0.95) return null;
   const r = detectClassic(cropImage(imageData, { x0, y0, w, h }), cfg, true);
-  // Refinement may tighten (shrink) even at slightly lower confidence,
-  // but must never grow the quad — growth is the loose-ring failure mode.
+  // The jury (cover x fill) accepts or rejects the refined candidate at
+  // the detectV3 level — here only "same object" and basic confidence.
   if (!r || r.confidence < 0.9 * first.confidence) return null;
-  const rGlobal = r.quad.map((v, i) => v + (i % 2 === 0 ? x0 : y0));
-  if (ringHasInk(imageData, rGlobal, first.quad)) return null;
   for (let i = 0; i < 8; i += 2) { r.quad[i] += x0; r.quad[i + 1] += y0; }
   // same object? sampled quad IoU against the first pass
   let inter = 0, uni = 0;
@@ -843,7 +833,6 @@ function refineByCrop(imageData, cfg, first) {
     }
   }
   if (!uni || inter / uni < 0.6) return null;
-  if (quadArea(r.quad) > 1.02 * quadArea(q)) return null;
   r.cx += 0; r.cy += 0;
   let cx = 0, cy = 0;
   for (let i = 0; i < 4; i++) { cx += r.quad[i * 2]; cy += r.quad[i * 2 + 1]; }
@@ -852,7 +841,7 @@ function refineByCrop(imageData, cfg, first) {
   return r;
 }
 
-function floodRescue(imageData, cfg) {
+function floodRescue(imageData, cfg, _judge) {
   // Flood RESCUE: when the classic pass sees nothing, localize the
   // document basin (Gaussian-biased flood) and rerun the classic
   // detector inside the padded ROI, where its global statistics become
