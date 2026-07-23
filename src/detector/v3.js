@@ -594,7 +594,16 @@ export function detectV3(imageData, cfg) {
   // map built once); generators are the expensive part and run lazily.
   const judge = buildJudge(imageData);
   const candidates = [];
-  const consider = (r) => { if (r) { r.verdict = judge(r.quad); candidates.push(r); } };
+  const consider = (r) => {
+    if (!r) return;
+    // absolute sanity: corners beyond frame+8px are not detections
+    for (let i = 0; i < 4; i++) {
+      if (r.quad[i * 2] < -8 || r.quad[i * 2] > imageData.width + 8 ||
+          r.quad[i * 2 + 1] < -8 || r.quad[i * 2 + 1] > imageData.height + 8) return;
+    }
+    r.verdict = judge.verdict(r.quad);
+    candidates.push(r);
+  };
 
   // scene stats for lazy-generation decisions only
   const ds = downscaleMinMax(imageData, 64);
@@ -605,7 +614,7 @@ export function detectV3(imageData, cfg) {
   consider(detectWhiteness(imageData, cfg));
   // verdict-based laziness: summon more witnesses only on ambiguity
   const decisive = () => {
-    const b = pickWinner(candidates);
+    const b = pickWinner(candidates, judge);
     return b && b.verdict.cover >= 0.88 && b.verdict.fill >= 0.12;
   };
   // INVARIANT (oldest in the codebase): ink NEVER runs on saturated
@@ -618,14 +627,15 @@ export function detectV3(imageData, cfg) {
   if (!decisive()) {
     consider(floodRescue(imageData, cfg, judge));
   }
-  let out = pickWinner(candidates);
+  let out = pickWinner(candidates, judge);
   if (!out) return null;
-  // refinement is one more juror: accepted only if the judge prefers it
+  // refinement is one more juror — judged by the SAME scoring as
+  // everyone else (cover eligibility + fill x sharpness), no side door
   const refined = refineByCrop(imageData, cfg, out);
   if (refined) {
-    refined.verdict = judge(refined.quad);
-    if (refined.verdict.cover >= 0.97 * out.verdict.cover
-        && refined.verdict.fill >= out.verdict.fill) out = refined;
+    refined.verdict = judge.verdict(refined.quad);
+    const w = pickWinner([out, refined], judge);
+    if (w) out = w;
   }
   return out;
 }
@@ -739,14 +749,31 @@ function refineSidesToEdges(mn, W, H, quad, searchOut, searchIn) {
 }
 
 
-function pickWinner(candidates) {
+// CONSENSUS selection. Every true candidate CONTAINS the document and
+// disagrees only about background extensions, so document ink is the
+// ink inside the candidates' intersection. Eligibility: a candidate
+// must keep >=95% of consensus ink (cutting consensus = cutting the
+// document — fold-cut quads fail here). Winner among eligible: highest
+// fill x sharpness (tight sides on real edges). This sidesteps the
+// polluted-ink-map problem entirely: background sheen outside the
+// intersection never votes.
+function pickWinner(candidates, judge) {
   if (!candidates.length) return null;
-  let bestCover = 0;
-  for (const c of candidates) bestCover = Math.max(bestCover, c.verdict.cover);
-  let win = null;
-  for (const c of candidates) {
-    if (c.verdict.cover < 0.9 * bestCover) continue;   // dropped content: ineligible
-    if (!win || c.verdict.fill > win.verdict.fill) win = c;
+  if (candidates.length === 1) return candidates[0];
+  const consensus = judge.consensusCover(candidates.map((c) => c.quad));
+  let win = null, winScore = -1;
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    if (consensus[i] < 0.95) continue;
+    const score = c.verdict.fill * (0.55 + 0.45 * (c.edgeQuality ?? 0));
+    if (score > winScore) { winScore = score; win = c; }
+  }
+  // all candidates cut consensus (degenerate): fall back to best score
+  if (!win) {
+    for (const c of candidates) {
+      const score = c.verdict.fill * (0.55 + 0.45 * (c.edgeQuality ?? 0));
+      if (score > winScore) { winScore = score; win = c; }
+    }
   }
   return win;
 }
@@ -754,17 +781,39 @@ function pickWinner(candidates) {
 // Shared 160px ink map -> judge(quad) = {cover, fill}.
 function buildJudge(imageData) {
   const ds = downscaleMinMax(imageData, 160);
-  const { mn, W, H, scale } = ds;
+  const { mn, mx, W, H, scale } = ds;
+  // Paper-adjacent ink only: text sits ON paper (bright, desaturated
+  // neighborhood); leather creases sit on dark leather; bedsheet
+  // cartoons are colorful. A gradient counts as DOCUMENT ink only if
+  // its 2px neighborhood touches paper-like pixels.
+  const paperish = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) {
+    const sat = mx[i] > 0 ? (mx[i] - mn[i]) / mx[i] : 0;
+    if (mn[i] > 120 && sat < 0.35) paperish[i] = 1;
+  }
+  const paperNear = boxSum(paperish, W, H, 2);
   const ink = new Uint8Array(W * H);
-  let inkTotal = 0;
   for (let y = 1; y < H - 1; y++) {
     for (let x = 1; x < W - 1; x++) {
       const i = y * W + x;
+      if (!paperNear[i]) continue;
       const g = Math.abs(mn[i + 1] - mn[i - 1]) + Math.abs(mn[i + W] - mn[i - W]);
-      if (g > 40) { ink[i] = 1; inkTotal++; }
+      if (g > 40) ink[i] = 1;
     }
   }
-  return (quad) => {
+  // DOCUMENT ink only: text is locally DENSE; background texture (wood
+  // grain, leather seams, tile grout) is sparse lines. Without this,
+  // cover rewards candidates that swallow textured background — on the
+  // sofa corpus the correct tight quad scored cover 0.46 and went
+  // ineligible while a seam-swallowing diamond won at 0.55.
+  const dens = boxSum(ink, W, H, 8);
+  const minDens = 0.10 * 17 * 17;
+  let inkTotal = 0;
+  for (let i = 0; i < W * H; i++) {
+    if (ink[i] && dens[i] < minDens) ink[i] = 0;
+    if (ink[i]) inkTotal++;
+  }
+  const verdict = (quad) => {
     const q = quad.map((v) => v * scale);
     let qx0 = W, qx1 = 0, qy0 = H, qy1 = 0;
     for (let i = 0; i < 4; i++) {
@@ -788,6 +837,53 @@ function buildJudge(imageData) {
     }
     return { cover: inkTotal ? inkIn / inkTotal : 0, fill: areaIn ? inkIn / areaIn : 0 };
   };
+  // For each candidate: fraction of intersection-ink it contains.
+  const consensusCover = (quads) => {
+    const qs = quads.map((quad) => quad.map((v) => v * scale));
+    const inQ = (q, x, y) => {
+      let inside = false;
+      for (let a = 0, b = 3; a < 4; b = a++) {
+        const xi = q[a * 2], yi = q[a * 2 + 1], xj = q[b * 2], yj = q[b * 2 + 1];
+        if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+      }
+      return inside;
+    };
+    let consTotal = 0;
+    const counts = new Array(qs.length).fill(0);
+    for (let y = 1; y < H - 1; y++) {
+      for (let x = 1; x < W - 1; x++) {
+        if (!ink[y * W + x]) continue;
+        // consensus pixel: inside ALL candidate quads
+        let inAll = true;
+        for (const q of qs) if (!inQ(q, x, y)) { inAll = false; break; }
+        if (!inAll) continue;
+        consTotal++;
+        for (let i = 0; i < qs.length; i++) counts[i]++; // by construction
+      }
+    }
+    // counts[i] === consTotal for all — refine: candidate keeps consensus
+    // ink means: how much of consensus ink lies inside candidate i alone?
+    // (by definition all of it). The useful signal is vs the near-
+    // consensus: pixels inside a MAJORITY of candidates.
+    if (qs.length >= 2) {
+      const maj = Math.ceil(qs.length / 2);
+      let majTotal = 0;
+      const majCounts = new Array(qs.length).fill(0);
+      for (let y = 1; y < H - 1; y++) {
+        for (let x = 1; x < W - 1; x++) {
+          if (!ink[y * W + x]) continue;
+          let n = 0;
+          const inFlags = qs.map((q) => (inQ(q, x, y) ? (n++, true) : false));
+          if (n < maj) continue;
+          majTotal++;
+          for (let i = 0; i < qs.length; i++) if (inFlags[i]) majCounts[i]++;
+        }
+      }
+      return majCounts.map((c) => (majTotal ? c / majTotal : 1));
+    }
+    return counts.map(() => 1);
+  };
+  return { verdict, consensusCover };
 }
 
 // Second-pass crop refinement: re-run the detector on a crop around the

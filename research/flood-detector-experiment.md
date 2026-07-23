@@ -81,3 +81,32 @@ maximize FILL subject to COVER >= 0.9 x best available cover. This is
 the calibrated content-guard designed right: per-frame, relative,
 measured — not a fixed ring threshold (the naive version collapsed SRD
 to 1.5%). Requires retaining a pre-polish candidate in detectWhiteness.
+
+## Jury branch completion (2026-07-23, branch jury-of-hypotheses)
+
+Judge evolution, each step referee-driven:
+1. cover x fill (ablation recipe) -> 3 scene regressions: fill is blind
+   to boundary placement.
+2. + sharpness seat (fill x f(edgeQuality)) -> fixed 2 frames.
+3. cover polluted by bg texture (leather seams count as ink; correct
+   tight quad scored cover 0.46, ineligible). Density filter: creases
+   are locally dense, no help. Paper-adjacency filter: sheen is
+   paperish, partial help.
+4. CONSENSUS selection: document ink = ink inside majority of
+   candidates; eligibility = keep >=95% of consensus ink; winner =
+   fill x sharpness. Sidesteps map pollution entirely.
+5. consider() gained absolute in-frame sanity (+-8px).
+
+DISCOVERY: v6.0-main sofa goldens were CORRUPTED — later edits in the
+trimodal session regressed the scene after the verification render,
+and --update pinned the regression (diamond quads [264,240,643,22...]).
+Blind pinning after intermediate edits is the failure mode; verify-
+then-pin must be atomic. Stripped on this branch; main carries them
+until merge.
+
+Final referee: corpus 124/124 (98 pinned + 26 known-hard flags),
+negatives 2/35, SRD 92.5%, synth OK. Perf: 289ms SRD mean — flood +
+multi-generator runs on hard scenes; easy scenes exit after one
+generator. Perf tuning is the remaining pre-merge work, plus the four
+known-hard scenes (white-fold, bedsheet, hand-held, sofa) which now
+fail equally on BOTH architectures.
