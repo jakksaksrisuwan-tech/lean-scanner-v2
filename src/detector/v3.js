@@ -840,6 +840,13 @@ function floodRescue(imageData, cfg) {
     if (r.quad[i * 2] < 3 || r.quad[i * 2] > crop.width - 3 ||
         r.quad[i * 2 + 1] < 3 || r.quad[i * 2 + 1] > crop.height - 3) return null;
   }
+  // Wide slivers are not documents: receipts run TALL (h/w up to ~4),
+  // never wide beyond ~1.8. The bag-zipper band measures w/h 4.7.
+  const wTop = Math.hypot(r.quad[2] - r.quad[0], r.quad[3] - r.quad[1]);
+  const wBot = Math.hypot(r.quad[4] - r.quad[6], r.quad[5] - r.quad[7]);
+  const hL = Math.hypot(r.quad[6] - r.quad[0], r.quad[7] - r.quad[1]);
+  const hR = Math.hypot(r.quad[4] - r.quad[2], r.quad[5] - r.quad[3]);
+  if ((wTop + wBot) / Math.max(1, hL + hR) > 3) return null;
   for (let i = 0; i < 8; i += 2) { r.quad[i] += roi.x0; r.quad[i + 1] += roi.y0; }
   r.cx += roi.x0; r.cy += roi.y0;
   r.segmentation = null; // grid was crop-relative; UI treats null as "skip"
